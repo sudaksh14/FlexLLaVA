@@ -152,6 +152,57 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
+        # ---- Elastic (Adaptive Matryoshka) training branch -------------
+        # Single axis (L_tok). LoRA level (if any) is set per tok level BEFORE
+        # forward_single_matryoshka, whose internal re-encode then uses the
+        # right adapter. Pure M3 (no engine) runs the original path below.
+        engine = getattr(self, "elastic_engine", None)
+        if self.training and engine is not None:
+            from ..elastic import losses as _el
+            loss = 0
+            logits_accumulate = []
+            grid = list(engine.grid())
+            teacher_logits = None
+            teacher_tokens = None
+            for l_tok in grid:
+                engine._set_lora_level(l_tok)
+                loss_item, logits, outputs = self.forward_single_matryoshka(
+                    input_ids=input_ids, attention_mask=attention_mask,
+                    position_ids=position_ids, past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds, labels=labels, use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    images=images, image_sizes=image_sizes, return_dict=return_dict,
+                    matryoshka_vis_token_scale=l_tok,
+                )
+                loss += loss_item / len(grid)
+                cur_tokens = engine.last_tokens   # projected visual tokens this level
+                if l_tok == engine.cfg.kl_teacher_tok_level:
+                    teacher_logits = logits.detach()
+                    teacher_tokens = cur_tokens.detach() if cur_tokens is not None else None
+                else:
+                    if engine.cfg.use_prefix_kl and teacher_logits is not None:
+                        n = min(teacher_logits.shape[1], logits.shape[1])
+                        kl = _el.prefix_kl_loss(
+                            logits[:, :n], teacher_logits[:, :n],
+                            labels[:, :n] if labels is not None else None)
+                        loss = loss + engine.cfg.prefix_kl_weight * kl / len(grid)
+                    # coral: keep this level's token distribution close to teacher's
+                    if (engine.cfg.use_coral_align and teacher_tokens is not None
+                            and cur_tokens is not None):
+                        coral = _el.coral_loss(cur_tokens, teacher_tokens)
+                        loss = loss + engine.cfg.coral_weight * coral / len(grid)
+                logits_accumulate.append(logits)
+            logits = torch.cat(logits_accumulate, dim=1)
+            if not return_dict:
+                output = (logits,) + outputs[1:]
+                return (loss,) + output if loss is not None else output
+            return CausalLMOutputWithPast(
+                loss=loss, logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states, attentions=outputs.attentions,
+            )
+
         if self.training and self.config.matryoshka_vis_token_scale is not None:
             # print("The model is in training mode.")
             loss = 0

@@ -145,6 +145,13 @@ class LlavaMetaForCausalLM(ABC):
         return image_features
     
     def matryoshka_vis_token_process(self, image_features, matryoshka_vis_token_scale):
+        # Elastic branch: when an ElasticEngine is attached, delegate token
+        # reduction (pooling OR nested-query) to it. Pure M3 (no engine) falls
+        # through to the original avg-pool below, unchanged.
+        engine = getattr(self, "elastic_engine", None)
+        if engine is not None:
+            # single elasticity axis: scale is the L_tok index.
+            return engine.reduce_tokens(image_features, matryoshka_vis_token_scale)
         N, H_W, C = image_features.shape
         H = W = int(H_W ** 0.5)
         reshaped_tensor = image_features.view(N, H, W, C)

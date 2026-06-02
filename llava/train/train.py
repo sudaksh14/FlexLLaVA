@@ -800,6 +800,9 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
                 data_collator=data_collator)
 
 
+ELASTIC_CONFIG = None  # set by train_elastic.py launcher
+
+
 def train(attn_implementation=None):
     global local_rank
 
@@ -978,6 +981,21 @@ def train(attn_implementation=None):
                 if hasattr(module, 'weight'):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
+
+    # --- Elastic (Adaptive Matryoshka) attach hook ------------------------
+    if ELASTIC_CONFIG is not None:
+        from llava.model.elastic import attach_elastic_engine
+        attach_elastic_engine(model, ELASTIC_CONFIG)
+        # ensure the elastic training branch fires (it checks engine, not this,
+        # but eval/generate read the config scale list)
+        model.config.matryoshka_vis_token_scale = list(range(len(ELASTIC_CONFIG.tok_levels)))
+        # train ONLY the elastic modules + LoRA; base ViT and LLM stay frozen
+        for n, p in model.named_parameters():
+            if any(k in n for k in ("elastic_resampler", "elastic_projector",
+                                    "lora_A", "lora_B")):
+                p.requires_grad_(True)
+        rank0_print(f"[elastic] engine attached: token_reduction="
+                    f"{ELASTIC_CONFIG.token_reduction}, use_lora={ELASTIC_CONFIG.use_lora}")
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
