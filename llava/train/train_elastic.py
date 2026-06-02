@@ -48,6 +48,7 @@ CONFIG = ElasticConfig(
     use_coral_align=True, coral_weight=0.1,
     use_nested_dropout=True,
     kl_teacher_tok_level=0,              # index of the full-token (teacher) level
+    log_adapter_every=50,               # log LoRA adapter divergence every 50 steps
 )
 
 

@@ -60,6 +60,7 @@ class ElasticConfig:
     use_token_decorrelation: bool = False
     decorr_weight: float = 0.01
     kl_teacher_tok_level: int = 0        # index into tok_levels (highest = full)
+    log_adapter_every: int = 0           # >0: log LoRA adapter divergence every N steps
 
     # ---- derived -------------------------------------------------------
     def tok_grid(self) -> List[int]:

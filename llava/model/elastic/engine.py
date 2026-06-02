@@ -34,6 +34,7 @@ class ElasticEngine:
         # Projector stays full-width (no nesting): width is not an elasticity axis.
         self.projector = NestedProjector(vision_dim, llm_dim, widths=None)
         self.last_tokens = None   # latest projected visual tokens (for coral)
+        self._step = 0            # training-step counter for adapter logging
 
     # -- grid (1-D over token levels) -----------------------------------
     def grid(self):
@@ -89,6 +90,52 @@ class ElasticEngine:
         if self.cfg.use_token_decorrelation and student_tokens is not None:
             total = total + self.cfg.decorr_weight * losses.decorrelation_loss(student_tokens)
         return total
+
+    @torch.no_grad()
+    def adapter_stats(self):
+        """Per-level effective-LoRA delta W_k = (alpha/r_k)*A[:, :r_k]@B[:r_k] .
+        Returns mean Frobenius norm per level and mean pairwise distance between
+        consecutive levels (averaged over all adapted layers). If the adapters
+        specialize, pairwise distances should be clearly > 0 and grow."""
+        wrappers = getattr(self.vision_tower, "_lora_wrappers", None)
+        if not wrappers:
+            return None
+        ranks = self.cfg.lora_ranks
+        nL = len(ranks)
+        norm_acc = [0.0] * nL
+        pair_acc = [0.0] * (nL - 1)
+        for w in wrappers:
+            deltas = [(w.alpha / r) * (w.lora_A[:, :r] @ w.lora_B[:r, :]) for r in ranks]
+            for i, d in enumerate(deltas):
+                norm_acc[i] += d.norm().item()
+            for i in range(nL - 1):
+                pair_acc[i] += (deltas[i] - deltas[i + 1]).norm().item()
+        n = len(wrappers)
+        return {"level_norms": [x / n for x in norm_acc],
+                "pairwise_consec_dist": [x / n for x in pair_acc]}
+
+    def maybe_log_adapters(self):
+        """Call once per training step. Prints adapter divergence every N steps
+        (rank 0 only) when cfg.log_adapter_every > 0 and LoRA is specialized."""
+        self._step += 1
+        every = getattr(self.cfg, "log_adapter_every", 0)
+        if not every or self._step % every != 0:
+            return
+        if not (self.cfg.use_lora and self.cfg.lora_specialize_tok):
+            return
+        try:
+            import torch.distributed as dist
+            if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+                return
+        except Exception:
+            pass
+        stats = self.adapter_stats()
+        if stats is None:
+            return
+        norms = ", ".join(f"{x:.4f}" for x in stats["level_norms"])
+        pair = ", ".join(f"{x:.4f}" for x in stats["pairwise_consec_dist"])
+        print(f"[elastic][step {self._step}] LoRA level norms = [{norms}] | "
+              f"consecutive-level distance = [{pair}]  (>0 => specializing)")
 
 
 def attach_elastic_engine(model, cfg):

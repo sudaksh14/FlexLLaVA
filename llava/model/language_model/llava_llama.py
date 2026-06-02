@@ -193,6 +193,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                         coral = _el.coral_loss(cur_tokens, teacher_tokens)
                         loss = loss + engine.cfg.coral_weight * coral / len(grid)
                 logits_accumulate.append(logits)
+            engine.maybe_log_adapters()
             logits = torch.cat(logits_accumulate, dim=1)
             if not return_dict:
                 output = (logits,) + outputs[1:]
