@@ -1,4 +1,4 @@
-# 🌋 M3: Matryoshka Multimodal Models
+# 🌋 FlexLLaVA
 
 *Learning multi-granularities visual tokens a coarse-to-fine nested way*
 <br>
