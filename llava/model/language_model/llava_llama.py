@@ -160,6 +160,10 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         if self.training and engine is not None:
             from ..elastic import losses as _el
             loss = 0
+            ce_total = 0.0
+            kl_total = 0.0
+            coral_total = 0.0
+            per_level = {}   # keyed by actual token count, e.g. "tok256"
             logits_accumulate = []
             grid = list(engine.grid())
             teacher_logits = None
@@ -175,24 +179,50 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                     images=images, image_sizes=image_sizes, return_dict=return_dict,
                     matryoshka_vis_token_scale=l_tok,
                 )
+                n_tok = engine.cfg.tok_levels[l_tok]
+                tag = f"tok{n_tok}"
+                ce_val = loss_item.item() / len(grid)
+                ce_total += ce_val
+                per_level[f"loss/ce_{tag}"] = loss_item.item()   # raw CE at this level
                 loss += loss_item / len(grid)
-                cur_tokens = engine.last_tokens   # projected visual tokens this level
+                cur_tokens = engine.last_tokens
                 if l_tok == engine.cfg.kl_teacher_tok_level:
                     teacher_logits = logits.detach()
                     teacher_tokens = cur_tokens.detach() if cur_tokens is not None else None
                 else:
                     if engine.cfg.use_prefix_kl and teacher_logits is not None:
                         n = min(teacher_logits.shape[1], logits.shape[1])
-                        kl = _el.prefix_kl_loss(
-                            logits[:, :n], teacher_logits[:, :n],
-                            labels[:, :n] if labels is not None else None)
-                        loss = loss + engine.cfg.prefix_kl_weight * kl / len(grid)
-                    # coral: keep this level's token distribution close to teacher's
+                        # Tail-align: visual tokens are at the start, text at the end.
+                        # Taking the last n positions of each gives comparable text
+                        # positions even though teacher has more visual tokens.
+                        s_log = logits[:, logits.shape[1] - n:]
+                        t_log = teacher_logits[:, teacher_logits.shape[1] - n:]
+                        # labels is the original (pre-expansion) text sequence;
+                        # clip to n for safety in case it's shorter.
+                        kl_labels = None
+                        if labels is not None:
+                            L = min(n, labels.shape[1])
+                            kl_labels = labels[:, labels.shape[1] - L:]
+                        kl = _el.prefix_kl_loss(s_log, t_log, kl_labels)
+                        kl_weighted = engine.cfg.prefix_kl_weight * kl / len(grid)
+                        kl_total += kl_weighted.item()
+                        per_level[f"loss/kl_{tag}"] = kl.item()  # raw KL at this level
+                        loss = loss + kl_weighted
                     if (engine.cfg.use_coral_align and teacher_tokens is not None
                             and cur_tokens is not None):
                         coral = _el.coral_loss(cur_tokens, teacher_tokens)
-                        loss = loss + engine.cfg.coral_weight * coral / len(grid)
+                        coral_weighted = engine.cfg.coral_weight * coral / len(grid)
+                        coral_total += coral_weighted.item()
+                        per_level[f"loss/coral_{tag}"] = coral.item()  # raw CORAL at this level
+                        loss = loss + coral_weighted
                 logits_accumulate.append(logits)
+            # side-channel for LLaVATrainer.compute_loss to pick up and log
+            self._loss_components = {
+                "loss/ce": ce_total,
+                "loss/kl": kl_total,
+                "loss/coral": coral_total,
+                **per_level,
+            }
             engine.maybe_log_adapters()
             logits = torch.cat(logits_accumulate, dim=1)
             if not return_dict:

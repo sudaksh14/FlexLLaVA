@@ -141,7 +141,11 @@ class LlavaMetaForCausalLM(ABC):
 
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
-        image_features = self.get_model().mm_projector(image_features)
+        # When the elastic engine is active it owns the full vision→LLM projection
+        # (resampler in CLIP space + its own projector). Skip the base mm_projector
+        # so image_features stay in CLIP space (vision_dim) for the resampler.
+        if getattr(self, "elastic_engine", None) is None:
+            image_features = self.get_model().mm_projector(image_features)
         return image_features
     
     def matryoshka_vis_token_process(self, image_features, matryoshka_vis_token_scale):
@@ -170,6 +174,14 @@ class LlavaMetaForCausalLM(ABC):
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
+
+        # For elastic LoRA specialization: set the adapter level BEFORE running
+        # the vision tower so the correct lora_A/lora_B slice is active.
+        if matryoshka_vis_token_scale is not None:
+            _eng = getattr(self, "elastic_engine", None)
+            if (_eng is not None and _eng.cfg.use_lora
+                    and _eng.cfg.lora_specialize_tok):
+                _eng._set_lora_level(matryoshka_vis_token_scale)
 
         if type(images) is list or images.ndim == 5:
             if type(images) is list:

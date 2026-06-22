@@ -1,0 +1,43 @@
+=== LLaVA Finetune image download started: Mon Jun 22 15:22:26 CEST 2026 ===
+Node: node207
+
+── COCO train2017 ──
+[skip] /var/scratch/skalra/flexllava/data/LLaVA-Finetune/coco already has files
+
+── GQA images ──
+[skip] /var/scratch/skalra/flexllava/data/LLaVA-Finetune/gqa already has files
+
+── TextVQA ──
+[skip] /var/scratch/skalra/flexllava/data/LLaVA-Finetune/textvqa already has files
+
+── VisualGenome part1 ──
+[skip] /var/scratch/skalra/flexllava/data/LLaVA-Finetune/vg already has files
+
+── VisualGenome part2 ──
+[skip] /var/scratch/skalra/flexllava/data/LLaVA-Finetune/vg already has files
+
+── OCR-VQA ──
+OCR-VQA requires manual download from Google Drive.
+1. Visit: https://drive.google.com/drive/folders/1_GYPY5UkUy7HIcR0zq3ZCFgeZN7BAfm_
+2. Download loadDataset.py from that folder.
+3. Run:  python loadDataset.py --out_dir /var/scratch/skalra/flexllava/data/LLaVA-Finetune/ocr_vqa/images
+   (The script downloads images and saves them as .jpg)
+
+=== Download complete: Mon Jun 22 15:22:26 CEST 2026 ===
+
+Directory sizes:
+0	/var/scratch/skalra/flexllava/data/LLaVA-Finetune/coco/
+0	/var/scratch/skalra/flexllava/data/LLaVA-Finetune/gqa/
+0	/var/scratch/skalra/flexllava/data/LLaVA-Finetune/ocr_vqa/
+0	/var/scratch/skalra/flexllava/data/LLaVA-Finetune/textvqa/
+0	/var/scratch/skalra/flexllava/data/LLaVA-Finetune/vg/
+
+Expected final structure:
+  /var/scratch/skalra/flexllava/data/LLaVA-Finetune/
+  ├── llava_v1_5_mix665k.json  (983 MB — already downloaded)
+  ├── coco/train2017/           COCO 2017 train images
+  ├── gqa/images/               GQA images
+  ├── ocr_vqa/images/           OCR-VQA images (manual step above)
+  ├── textvqa/train_images/     TextVQA train+val images
+  └── vg/VG_100K/              VisualGenome part1
+      vg/VG_100K_2/            VisualGenome part2

@@ -26,7 +26,8 @@ def prefix_kl_loss(student_logits, teacher_logits, labels=None, T=1.0):
     kl = F.kl_div(s, t, reduction="none").sum(-1)  # (B, L)
     if labels is not None:
         mask = (labels != -100).float()
-        kl = (kl * mask).sum() / mask.sum().clamp_min(1.0)
+        L = min(kl.shape[1], mask.shape[1])
+        kl = (kl[:, :L] * mask[:, :L]).sum() / mask[:, :L].sum().clamp_min(1.0)
     else:
         kl = kl.mean()
     return (T * T) * kl

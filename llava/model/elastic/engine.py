@@ -30,7 +30,10 @@ class ElasticEngine:
         self.vision_tower = vision_tower
         self.resampler = None
         if cfg.is_nested_query:
-            self.resampler = NestedQueryResampler(vision_dim, cfg.num_query_tokens)
+            num_patches = getattr(vision_tower, "num_patches", 576)
+            self.resampler = NestedQueryResampler(vision_dim, cfg.num_query_tokens,
+                                                  num_patches=num_patches,
+                                                  use_pos_embed=cfg.use_pos_embed)
         # Projector stays full-width (no nesting): width is not an elasticity axis.
         self.projector = NestedProjector(vision_dim, llm_dim, widths=None)
         self.last_tokens = None   # latest projected visual tokens (for coral)

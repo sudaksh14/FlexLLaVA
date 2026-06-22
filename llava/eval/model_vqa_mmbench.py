@@ -9,6 +9,7 @@ import shortuuid
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.conversation import conv_templates, SeparatorStyle
 from llava.model.builder import load_pretrained_model
+from llava.eval.model_vqa_elastic import load_elastic_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, process_images, load_image_from_base64, get_model_name_from_path
 
@@ -52,11 +53,18 @@ def get_options(row, options):
 
 
 def eval_model(args):
-    # Model
+    # Model — use elastic loader when tok-level is specified
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
+    tok_level = getattr(args, "tok_level", None)
+    if tok_level is not None:
+        tokenizer, model, image_processor, context_len = load_elastic_model(
+            model_path, getattr(args, "model_base", None))
+        args.matryoshka_vis_token_scale = tok_level
+    else:
+        tokenizer, model, image_processor, context_len = load_pretrained_model(
+            model_path, args.model_base, model_name)
 
     questions = pd.read_table(os.path.expanduser(args.question_file))
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -157,6 +165,8 @@ if __name__ == "__main__":
     parser.add_argument("--single-pred-prompt", action="store_true")
     parser.add_argument("--lang", type=str, default="en")
     parser.add_argument("--matryoshka_vis_token_scale", type=int, default=None)
+    parser.add_argument("--tok-level", type=int, default=None,
+                        help="Elastic token level index 0-3 (overrides matryoshka_vis_token_scale)")
     args = parser.parse_args()
 
     eval_model(args)

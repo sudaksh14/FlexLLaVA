@@ -361,6 +361,19 @@ class LLaVATrainer(Trainer):
 
         return self.optimizer
 
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
+
+        # Log elastic component losses + perplexity if the forward populated them.
+        components = getattr(model, "_loss_components", None)
+        if components is not None:
+            log_dict = dict(components)
+            log_dict["loss/total"] = loss.item()
+            log_dict["perplexity"] = float(torch.exp(torch.tensor(components["loss/ce"])))
+            self.log(log_dict)
+
+        return (loss, outputs) if return_outputs else loss
+
     def _save_checkpoint(self, model, trial, metrics=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR

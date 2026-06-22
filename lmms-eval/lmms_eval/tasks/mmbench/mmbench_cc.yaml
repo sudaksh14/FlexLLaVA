@@ -1,7 +1,7 @@
 dataset_path: lmms-lab/MMBench
 dataset_name: cc
 dataset_kwargs:
-  token: True
+  token: False
 task: "mmbench_cn_cc"
 test_split: test
 output_type: generate_until

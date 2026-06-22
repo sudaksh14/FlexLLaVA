@@ -50,6 +50,7 @@ class ElasticConfig:
     lora_dropout: float = 0.0
 
     # ---- loss configuration (nested_query method) ----------------------
+    use_pos_embed: bool = False          # learned patch+query positional encodings in resampler
     use_prefix_kl: bool = True           # coarse-to-fine self-distillation
     prefix_kl_weight: float = 1.0
     use_nested_dropout: bool = True      # random truncation -> induces ordering

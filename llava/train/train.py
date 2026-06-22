@@ -76,6 +76,10 @@ class ModelArguments:
     mm_vision_select_feature: Optional[str] = field(default="patch")
     matryoshka_vis_token_scale: Optional[str] = field(default=None)
     unfreeze_mm_vision_tower: bool = field(default=False)
+    pretrain_elastic_path: Optional[str] = field(default=None,
+        metadata={"help": "Path to Stage 1 elastic checkpoint. "
+                  "Warm-starts elastic_resampler, elastic_projector, and LoRA "
+                  "weights in Stage 2 after attach_elastic_engine."})
     
 
 
@@ -123,6 +127,8 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_bias: str = "none"
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
+    group_by_modality_length_auto: bool = field(default=False)
+    group_by_varlen: bool = field(default=False)
     mm_vision_tower_lr: Optional[float] = None
     
 
@@ -195,6 +201,52 @@ def find_all_linear_names(model):
     if 'lm_head' in lora_module_names: # needed for 16-bit
         lora_module_names.remove('lm_head')
     return list(lora_module_names)
+
+
+def _load_elastic_pretrain_weights(model, path: str):
+    """Warm-start elastic_resampler, elastic_projector, and LoRA A/B weights
+    from a Stage 1 checkpoint.  Called after attach_elastic_engine so the
+    target submodules already exist in the model.
+
+    Stage 2 uses liuhaotian/llava-v1.5-7b as the LLM base; HF from_pretrained
+    skips unknown keys (elastic modules, LoRA), so they must be loaded here.
+    """
+    import glob as _glob
+    weight_files = sorted(_glob.glob(os.path.join(path, "pytorch_model*.bin")))
+    if not weight_files:
+        try:
+            from safetensors.torch import load_file as _sf_load
+            weight_files = sorted(_glob.glob(os.path.join(path, "model*.safetensors")))
+            _loader = _sf_load
+        except ImportError:
+            _loader = None
+    else:
+        _loader = lambda f: torch.load(f, map_location="cpu")
+
+    if not weight_files:
+        rank0_print(f"[elastic] pretrain_elastic_path={path}: no weight files found, skipping warm-start")
+        return
+
+    elastic_sd = {}
+    for wf in weight_files:
+        sd = _loader(wf)
+        for k, v in sd.items():
+            if any(tag in k for tag in ("elastic_resampler.", "elastic_projector.", ".lora_A", ".lora_B")):
+                elastic_sd[k] = v
+
+    if not elastic_sd:
+        rank0_print(f"[elastic] pretrain_elastic_path={path}: no elastic keys found in checkpoint")
+        return
+
+    missing, unexpected = model.load_state_dict(elastic_sd, strict=False)
+    loaded = len(elastic_sd) - len(unexpected)
+    elastic_missing = [k for k in missing if any(t in k for t in
+                       ("elastic_resampler", "elastic_projector", "lora_A", "lora_B"))]
+    rank0_print(f"[elastic] warm-started from {path}: "
+                f"{loaded}/{len(elastic_sd)} keys loaded; "
+                f"{len(elastic_missing)} elastic keys still missing "
+                f"(unexpected={len(unexpected)})")
+
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
@@ -996,6 +1048,8 @@ def train(attn_implementation=None):
                 p.requires_grad_(True)
         rank0_print(f"[elastic] engine attached: token_reduction="
                     f"{ELASTIC_CONFIG.token_reduction}, use_lora={ELASTIC_CONFIG.use_lora}")
+        if getattr(model_args, "pretrain_elastic_path", None):
+            _load_elastic_pretrain_weights(model, model_args.pretrain_elastic_path)
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
@@ -1013,6 +1067,16 @@ def train(attn_implementation=None):
     else:
         trainer.train()
     trainer.save_state()
+
+    # Persist elastic config so eval scripts can re-attach the engine without
+    # re-specifying all hyperparameters.
+    if ELASTIC_CONFIG is not None:
+        import json as _json
+        import dataclasses as _dc
+        if training_args.local_rank in (-1, 0):
+            _cfg_path = os.path.join(training_args.output_dir, "elastic_config.json")
+            _json.dump(_dc.asdict(ELASTIC_CONFIG), open(_cfg_path, "w"), indent=2)
+            rank0_print(f"[elastic] saved elastic_config.json to {training_args.output_dir}")
 
     model.config.use_cache = True
 
