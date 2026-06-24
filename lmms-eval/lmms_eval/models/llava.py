@@ -294,9 +294,11 @@ class Llava(lmms):
         pbar = tqdm(total=num_iters, disable=(self.rank != 0), desc="Model Responding")
         for chunk in chunks:
             contexts, all_gen_kwargs, doc_to_visual, doc_id, task, split = zip(*chunk)
+            # Use per-item task/split/visual: Collator groups by gen_kwargs, not by task,
+            # so a batch can contain items from different tasks with different doc_id spaces.
+            visuals = [doc_to_visual[i](self.task_dict[task[i]][split[i]][ids]) for i, ids in enumerate(doc_id)]
             task = task[0]
             split = split[0]
-            visuals = [doc_to_visual[0](self.task_dict[task][split][ids]) for ids in doc_id]
             visuals = self.flatten(visuals)
             # we assume all gen kwargs in the batch are the same
             # this is safe to assume because the `grouper` object ensures it.

@@ -1,12 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=eval_lmms
-#SBATCH -t 08:00:00
+#SBATCH -t 2-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:A40:1
 #SBATCH --cpus-per-task=8
 #SBATCH --output=./jobs/eval_lmms_%A.out
-#SBATCH --export=ALL,WANDB_API_KEY=dfcd2574507b9ebe69ca13ab6f6925d864e82ee0
 
 # FlexLLaVA evaluation via lmms-eval (same framework as AdaLLaVA).
 # Evaluates all 4 token levels on 6 benchmarks; datasets auto-download from HF.

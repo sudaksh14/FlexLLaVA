@@ -36,8 +36,8 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --pretrain_elastic_path /var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \
     --version v1 \
-    --data_path /var/scratch/skalra/flexllava/data/llava_v1_5_mix665k.json \
-    --image_folder /var/scratch/skalra/flexllava/data \
+    --data_path /var/scratch/skalra/flexllava/data/LLaVA-Finetune/llava_v1_5_mix665k.json \
+    --image_folder /var/scratch/skalra/flexllava/data/LLaVA-Finetune \
     --vision_tower openai/clip-vit-large-patch14-336 \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \

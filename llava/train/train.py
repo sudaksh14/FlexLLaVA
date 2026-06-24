@@ -1050,6 +1050,13 @@ def train(attn_implementation=None):
                     f"{ELASTIC_CONFIG.token_reduction}, use_lora={ELASTIC_CONFIG.use_lora}")
         if getattr(model_args, "pretrain_elastic_path", None):
             _load_elastic_pretrain_weights(model, model_args.pretrain_elastic_path)
+        # mm_projector is bypassed by encode_images when elastic_engine is active;
+        # drop it before DeepSpeed/Trainer init so its ~8M params free GPU memory.
+        base = model.get_model()
+        if hasattr(base, "mm_projector"):
+            del base.mm_projector
+            torch.cuda.empty_cache()
+            rank0_print("[elastic] dropped base mm_projector (~8M params freed)")
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)

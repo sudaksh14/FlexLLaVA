@@ -32,13 +32,14 @@ echo "Node: $(hostname)"
 download_and_unzip() {
     local url="$1"
     local dest_dir="$2"
+    local check_dir="${3:-$dest_dir}"  # optional: specific subdir to check for existing files
     local zip_name
     zip_name=$(basename "$url")
     local zip_path="$TMP/$zip_name"
 
     # Check for actual files (not just empty subdirs) before skipping
-    if find "$dest_dir" -maxdepth 3 -type f 2>/dev/null | grep -q .; then
-        echo "[skip] $dest_dir already has files"
+    if find "$check_dir" -maxdepth 3 -type f 2>/dev/null | grep -q .; then
+        echo "[skip] $check_dir already has files"
         return
     fi
 
@@ -83,13 +84,15 @@ echo ""
 echo "── VisualGenome part1 ──"
 download_and_unzip \
     "https://cs.stanford.edu/people/rak248/VG_100K_2/images.zip" \
-    "$DATA/vg"
+    "$DATA/vg" \
+    "$DATA/vg/VG_100K"
 
 echo ""
 echo "── VisualGenome part2 ──"
 download_and_unzip \
     "https://cs.stanford.edu/people/rak248/VG_100K_2/images2.zip" \
-    "$DATA/vg"
+    "$DATA/vg" \
+    "$DATA/vg/VG_100K_2"
 
 # images2.zip extracts to VG_100K_2/; already the right name
 # images.zip  extracts to VG_100K/;  already the right name
