@@ -23,6 +23,37 @@ from llava.model import *
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 
+def _build_llava_inference_model(model_path, **kwargs):
+    """Auto-detect backbone type and load the matching LlavaXxx model for inference."""
+    cfg = AutoConfig.from_pretrained(model_path)
+    model_type = cfg.model_type
+    _cls_map = {
+        "llama":         LlavaLlamaForCausalLM,
+        "llava_llama":   LlavaLlamaForCausalLM,
+        "qwen2":         LlavaQwenForCausalLM,
+        "llava_qwen":    LlavaQwenForCausalLM,
+        "phi":           LlavaPhiForCausalLM,
+        "llava_phi":     LlavaPhiForCausalLM,
+        "stablelm":      LlavaStableLMForCausalLM,
+        "llava_stablelm": LlavaStableLMForCausalLM,
+        "mistral":       LlavaMistralForCausalLM,
+        "llava_mistral": LlavaMistralForCausalLM,
+    }
+    cls = _cls_map.get(model_type)
+    if cls is None:
+        # Unknown: try AutoModelForCausalLM (may work for llava_* checkpoints)
+        return AutoModelForCausalLM.from_pretrained(model_path, **kwargs)
+    return cls.from_pretrained(model_path, **kwargs)
+
+
+def _load_tokenizer(model_path, use_fast=False):
+    """Load tokenizer with a safe pad_token fallback for backbones without unk_token."""
+    tok = AutoTokenizer.from_pretrained(model_path, use_fast=use_fast)
+    if tok.pad_token is None:
+        tok.pad_token = tok.unk_token if tok.unk_token is not None else tok.eos_token
+    return tok
+
+
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
     kwargs = {"device_map": device_map, **kwargs}
 
@@ -94,9 +125,9 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 cfg_pretrained = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
                 model = LlavaMptForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
             else:
-                tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
+                tokenizer = _load_tokenizer(model_base, use_fast=False)
                 cfg_pretrained = AutoConfig.from_pretrained(model_path)
-                model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
+                model = _build_llava_inference_model(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
 
             mm_projector_weights = torch.load(os.path.join(model_path, 'mm_projector.bin'), map_location='cpu')
             mm_projector_weights = {k: v.to(torch.float16) for k, v in mm_projector_weights.items()}
@@ -113,12 +144,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                     **kwargs
                 )
             else:
-                tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
-                model = LlavaLlamaForCausalLM.from_pretrained(
-                    model_path,
-                    low_cpu_mem_usage=True,
-                    **kwargs
-                )
+                tokenizer = _load_tokenizer(model_path, use_fast=False)
+                model = _build_llava_inference_model(model_path, low_cpu_mem_usage=True, **kwargs)
     else:
         # Load language model
         if model_base is not None:

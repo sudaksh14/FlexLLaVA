@@ -141,6 +141,9 @@ class MMBench_Evaluator:
         return response.json()
 
     def get_chat_response(self, prompt, temperature=0, max_tokens=256, n=1, patience=5, sleep_time=3):
+        if not self.API_KEY or self.API_KEY == "YOUR_API_KEY":
+            return "Failed to obtain answer via API"
+
         messages = [
             {"role": "user", "content": prompt},
         ]

@@ -376,6 +376,36 @@ Answer the questions.""",
     sep="<|im_end|>",
 )
 
+# ---------------------------------------------------------------------------
+# ChatML template — used by Qwen2/Qwen2.5, StableLM-2 Zephyr, TinyLlama-Chat
+# ---------------------------------------------------------------------------
+conv_chatml = Conversation(
+    system="<|im_start|>system\n"
+           "A chat between a curious user and an artificial intelligence assistant. "
+           "The assistant gives helpful, detailed, and polite answers to the user's questions.",
+    roles=("<|im_start|>user\n", "<|im_start|>assistant\n"),
+    messages=[],
+    offset=0,
+    sep_style=SeparatorStyle.MPT,
+    sep="<|im_end|>",
+    version="chatml",
+)
+
+# ---------------------------------------------------------------------------
+# Phi-2 template  (USER / ASSISTANT with <|endoftext|> separator)
+# ---------------------------------------------------------------------------
+conv_phi = Conversation(
+    system="A chat between a curious user and an artificial intelligence assistant. "
+           "The assistant gives helpful, detailed, and polite answers to the user's questions.",
+    roles=("USER", "ASSISTANT"),
+    messages=[],
+    offset=0,
+    sep_style=SeparatorStyle.TWO,
+    sep=" ",
+    sep2="<|endoftext|>",
+    version="phi",
+)
+
 default_conversation = conv_vicuna_v1
 conv_templates = {
     "default": conv_vicuna_v0,
@@ -396,6 +426,13 @@ conv_templates = {
     "llava_llama_2": conv_llava_llama_2,
 
     "mpt": conv_mpt,
+
+    # Small LLM backbones for FlexLLaVA experiments
+    "chatml":    conv_chatml,    # Qwen2/Qwen2.5, StableLM-2 Zephyr, TinyLlama-Chat
+    "qwen":      conv_chatml,    # alias
+    "stablelm":  conv_chatml,    # alias
+    "tinyllama": conv_chatml,    # alias
+    "phi":       conv_phi,       # Phi-2
 }
 
 

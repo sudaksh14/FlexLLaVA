@@ -854,6 +854,50 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
 
 ELASTIC_CONFIG = None  # set by train_elastic.py launcher
 
+# Maps HuggingFace model_type → LlavaXxxForCausalLM class.
+# TinyLlama and SmolLM2 use model_type="llama" and are covered by LlavaLlamaForCausalLM.
+# Add new entries here when adding a new backbone file.
+_LLM_TYPE_TO_LLAVA_CLS = {
+    "llama":     "LlavaLlamaForCausalLM",
+    "llava":     "LlavaLlamaForCausalLM",   # liuhaotian/llava-v1.5-7b uses model_type='llava'
+    "qwen2":     "LlavaQwenForCausalLM",
+    "phi":       "LlavaPhiForCausalLM",
+    "stablelm":  "LlavaStableLMForCausalLM",
+    # llava_* → loaded from a saved FlexLLaVA checkpoint via AutoModelForCausalLM
+}
+
+
+def _build_llava_model(model_name_or_path, **kwargs):
+    """Peek at the HF config's model_type and return the matching LlavaXxx model."""
+    import transformers as _tf
+    from llava.model import (
+        LlavaLlamaForCausalLM,
+        LlavaQwenForCausalLM,
+        LlavaPhiForCausalLM,
+        LlavaStableLMForCausalLM,
+    )
+    _cls_map = {
+        "llama":    LlavaLlamaForCausalLM,
+        "llava":    LlavaLlamaForCausalLM,
+        "qwen2":    LlavaQwenForCausalLM,
+        "phi":      LlavaPhiForCausalLM,
+        "stablelm": LlavaStableLMForCausalLM,
+    }
+    cfg = _tf.AutoConfig.from_pretrained(
+        model_name_or_path, cache_dir=kwargs.get("cache_dir"), trust_remote_code=False)
+    model_type = cfg.model_type
+    if model_type.startswith("llava_"):
+        # Resume from a previously saved FlexLLaVA checkpoint.
+        return _tf.AutoModelForCausalLM.from_pretrained(model_name_or_path, **kwargs)
+    cls = _cls_map.get(model_type)
+    if cls is None:
+        raise ValueError(
+            f"Unsupported base LLM model_type={model_type!r} at {model_name_or_path}.\n"
+            f"Supported: {list(_cls_map)}. "
+            f"Add a llava_<backbone>.py and register it in _LLM_TYPE_TO_LLAVA_CLS.")
+    rank0_print(f"[FlexLLaVA] detected model_type={model_type!r} → {cls.__name__}")
+    return cls.from_pretrained(model_name_or_path, **kwargs)
+
 
 def train(attn_implementation=None):
     global local_rank
@@ -894,7 +938,7 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
         else:
-            model = LlavaLlamaForCausalLM.from_pretrained(
+            model = _build_llava_model(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,
@@ -902,7 +946,7 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
     else:
-        model = transformers.LlamaForCausalLM.from_pretrained(
+        model = transformers.AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             attn_implementation=attn_implementation,
@@ -974,7 +1018,11 @@ def train(attn_implementation=None):
     elif model_args.version == "v0.5":
         tokenizer.pad_token = tokenizer.unk_token
     else:
-        tokenizer.pad_token = tokenizer.unk_token
+        # Qwen2 and Phi-2 have no unk_token; fall back to eos_token.
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = (tokenizer.unk_token
+                                   if tokenizer.unk_token is not None
+                                   else tokenizer.eos_token)
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:

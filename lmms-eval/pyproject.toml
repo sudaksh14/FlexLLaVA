@@ -38,7 +38,7 @@ dependencies = [
     "openai>=1.0.0",
     "pycocoevalcap",
     "tqdm-multiprocess",
-    "transformers",
+    "transformers>=4.36,<5.0",
     "zstandard",
     "pillow",
     "pyyaml",
