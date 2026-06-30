@@ -23,15 +23,15 @@
 #
 # Global batch size = per_device_train_batch_size * gradient_accumulation_steps * num_gpus
 # 2x A40 (46 GB each): 4 * 16 * 2 = 128 (matches LLaVA-1.5 finetune recipe).
-# CPU offload (zero3_offload.json) is required because 7B optimizer states (~84 GB fp32)
-# exceed A40 VRAM even with ZeRO-3 partitioning across 2 GPUs.
+# 8-bit Adam (bitsandbytes) reduces optimizer states from 84 GB to ~21 GB,
+# so 21 GB / 2 GPUs = 10.5 GB/GPU fits alongside params + grads in 46 GB A40.
 
 deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --tok_levels 256 144 64 16 \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 1.0 \
     --coral_weight 0.1 \
-    --deepspeed ./scripts/zero3_offload.json \
+    --deepspeed ./scripts/zero3.json \
     --model_name_or_path liuhaotian/llava-v1.5-7b \
     --pretrain_elastic_path /var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \
@@ -48,9 +48,10 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --bf16 True \
     --output_dir /var/scratch/skalra/flexllava/checkpoints/llava-elastic-finetune \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 4 \
-    --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 16 \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 2 \
+    --gradient_accumulation_steps 32 \
+    --optim adamw_bnb_8bit \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 50000 \
@@ -61,7 +62,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 2048 \
+    --model_max_length 1024 \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
