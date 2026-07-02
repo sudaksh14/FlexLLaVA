@@ -67,7 +67,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 0.1 \
     --coral_weight 0.1 \
-    --deepspeed ./scripts/zero3.json \
+    --deepspeed ./scripts/zero2.json \
     --model_name_or_path "${MODEL_PATH}" \
     --pretrain_elastic_path "${PRETRAIN_CKPT}" \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \
@@ -99,6 +99,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --tf32 True \
     --model_max_length 1024 \
     --gradient_checkpointing True \
+    --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to wandb \

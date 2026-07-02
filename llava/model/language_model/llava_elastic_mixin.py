@@ -12,6 +12,7 @@ Example:
         ...
 """
 
+import random
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -87,6 +88,52 @@ class LlavaElasticMixin:
         return loss, logits, outputs
 
     # ------------------------------------------------------------------
+    # Config banner (printed once on rank 0 at the first training step)
+    # ------------------------------------------------------------------
+    def _maybe_print_elastic_banner(self, engine) -> None:
+        if getattr(self, "_elastic_banner_printed", False):
+            return
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() != 0:
+            self._elastic_banner_printed = True
+            return
+        cfg = engine.cfg
+        ve = getattr(self.config, "mm_vision_tower", "unknown")
+        llm = getattr(self.config, "_name_or_path", "unknown")
+        teacher_tok = cfg.tok_levels[cfg.kl_teacher_tok_level]
+        n = cfg.n_sample_students
+        n_students_total = len(cfg.tok_levels) - 1
+        if 0 < n < n_students_total:
+            mode = f"sample_student({n}) — teacher + {n} random student{'s' if n > 1 else ''} per step"
+        else:
+            mode = "all-levels — full grid every step"
+        kd_str = (
+            f"enabled  (prefix_kl_weight={cfg.prefix_kl_weight})"
+            if cfg.use_prefix_kl
+            else "DISABLED"
+        )
+        coral_str = (
+            f"enabled  (coral_weight={cfg.coral_weight})"
+            if cfg.use_coral_align
+            else "DISABLED"
+        )
+        sep = "=" * 64
+        print(
+            f"\n{sep}\n"
+            f"[FlexLLaVA] Elastic Engine Attached\n"
+            f"  Vision Encoder : {ve}\n"
+            f"  LLM            : {llm}\n"
+            f"  Token budgets  : {cfg.tok_levels}  (teacher = tok{teacher_tok})\n"
+            f"  LoRA ranks     : {cfg.lora_ranks}\n"
+            f"  Training mode  : {mode}\n"
+            f"  KD loss        : {kd_str}\n"
+            f"  CORAL loss     : {coral_str}\n"
+            f"{sep}\n",
+            flush=True,
+        )
+        self._elastic_banner_printed = True
+
+    # ------------------------------------------------------------------
     # Full forward: elastic grid / pure-M3 / standard eval
     # ------------------------------------------------------------------
     def forward(
@@ -110,6 +157,10 @@ class LlavaElasticMixin:
         engine = getattr(self, "elastic_engine", None)
         if self.training and engine is not None:
             from llava.model.elastic import losses as _el
+
+            self._maybe_print_elastic_banner(engine)
+
+            cfg = engine.cfg
             loss = 0
             ce_total = 0.0
             kl_total = 0.0
@@ -119,7 +170,22 @@ class LlavaElasticMixin:
             grid = list(engine.grid())
             teacher_logits = None
             teacher_tokens = None
-            for l_tok in grid:
+
+            # Sampled-student mode: teacher always runs; k students are drawn
+            # uniformly without replacement from the remaining levels.
+            # k=0 (default) runs the full grid. Each student is visited in
+            # expectation 1/n_students_total of the time, matching full-grid.
+            n_sample = cfg.n_sample_students
+            students_all = [l for l in grid if l != cfg.kl_teacher_tok_level]
+            if 0 < n_sample < len(students_all):
+                sampled_students = random.sample(students_all, k=n_sample)
+                active_levels = [cfg.kl_teacher_tok_level] + sampled_students
+            else:
+                sampled_students = None
+                active_levels = grid
+            n_active = len(active_levels)
+
+            for l_tok in active_levels:
                 engine._set_lora_level(l_tok)
                 loss_item, logits, outputs = self.forward_single_matryoshka(
                     input_ids=input_ids, attention_mask=attention_mask,
@@ -130,18 +196,17 @@ class LlavaElasticMixin:
                     images=images, image_sizes=image_sizes, return_dict=return_dict,
                     matryoshka_vis_token_scale=l_tok,
                 )
-                n_tok = engine.cfg.tok_levels[l_tok]
+                n_tok = cfg.tok_levels[l_tok]
                 tag = f"tok{n_tok}"
-                ce_val = loss_item.item() / len(grid)
-                ce_total += ce_val
                 per_level[f"loss/ce_{tag}"] = loss_item.item()
-                loss += loss_item / len(grid)
+                loss += loss_item / n_active
+                ce_total += loss_item.item() / n_active
                 cur_tokens = engine.last_tokens
-                if l_tok == engine.cfg.kl_teacher_tok_level:
+                if l_tok == cfg.kl_teacher_tok_level:
                     teacher_logits = logits.detach()
                     teacher_tokens = cur_tokens.detach() if cur_tokens is not None else None
                 else:
-                    if engine.cfg.use_prefix_kl and teacher_logits is not None:
+                    if cfg.use_prefix_kl and teacher_logits is not None:
                         n = min(teacher_logits.shape[1], logits.shape[1])
                         s_log = logits[:, logits.shape[1] - n:]
                         t_log = teacher_logits[:, teacher_logits.shape[1] - n:]
@@ -150,22 +215,27 @@ class LlavaElasticMixin:
                             L = min(n, labels.shape[1])
                             kl_labels = labels[:, labels.shape[1] - L:]
                         kl = _el.prefix_kl_loss(s_log, t_log, kl_labels)
-                        kl_weighted = engine.cfg.prefix_kl_weight * kl / len(grid)
+                        kl_weighted = cfg.prefix_kl_weight * kl / n_active
                         kl_total += kl_weighted.item()
                         per_level[f"loss/kl_{tag}"] = kl.item()
                         loss = loss + kl_weighted
-                    if (engine.cfg.use_coral_align and teacher_tokens is not None
+                    if (cfg.use_coral_align and teacher_tokens is not None
                             and cur_tokens is not None):
                         coral = _el.coral_loss(cur_tokens, teacher_tokens)
-                        coral_weighted = engine.cfg.coral_weight * coral / len(grid)
+                        coral_weighted = cfg.coral_weight * coral / n_active
                         coral_total += coral_weighted.item()
                         per_level[f"loss/coral_{tag}"] = coral.item()
                         loss = loss + coral_weighted
                 logits_accumulate.append(logits)
+
             self._loss_components = {
                 "loss/ce": ce_total, "loss/kl": kl_total, "loss/coral": coral_total,
                 **per_level,
             }
+            if sampled_students is not None:
+                # Log each sampled budget (sorted ascending) as an indexed wandb metric.
+                for i, tok in enumerate(sorted(cfg.tok_levels[l] for l in sampled_students)):
+                    self._loss_components[f"info/sampled_tok_{i}"] = float(tok)
             engine.maybe_log_adapters()
             logits = torch.cat(logits_accumulate, dim=1)
             if not return_dict:

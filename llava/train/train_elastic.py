@@ -20,6 +20,14 @@ Elastic-specific args (parsed here, stripped before HfArgumentParser sees argv):
                                      e.g. --lora_ranks 8 16 32 64
   --prefix_kl_weight  FLOAT          weight on the prefix-KL distillation term (default 1.0)
   --coral_weight      FLOAT          weight on the CORAL token-alignment term (default 0.1)
+  --use_kd            BOOL           enable prefix-KL self-distillation (default True)
+                                     e.g. --use_kd False  to disable for CE-only training
+  --use_coral         BOOL           enable CORAL alignment loss (default True)
+                                     e.g. --use_coral False  to disable
+  --n_sample_students INT            number of students to sample per step (default 0 = full grid)
+                                     1 → teacher + 1 random student (~50% compute saving)
+                                     2 → teacher + 2 random students (~25% compute saving)
+                                     0 or ≥ n_levels-1 → full grid (no sampling)
 
 All other flags are standard LLaVA training args.
 
@@ -41,10 +49,56 @@ Usage example:
 """
 
 import argparse
+import os
 import sys
 
 import llava.train.train as m3train
 from llava.model.elastic import ElasticConfig
+
+
+def _get_argv_value(key: str) -> str:
+    """Scan sys.argv for --key VALUE and return VALUE, or '?' if absent."""
+    try:
+        idx = sys.argv.index(key)
+        return sys.argv[idx + 1] if idx + 1 < len(sys.argv) else "?"
+    except ValueError:
+        return "?"
+
+
+def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
+    llm = _get_argv_value("--model_name_or_path")
+    ve = _get_argv_value("--vision_tower")
+    teacher_tok = tok_levels[0]
+    n = elastic_args.n_sample_students
+    n_students_total = len(tok_levels) - 1
+    if 0 < n < n_students_total:
+        mode = f"sample_student({n}) — teacher + {n} random student{'s' if n > 1 else ''} per step"
+    else:
+        mode = "all-levels — full grid every step"
+    kd_str = (
+        f"enabled  (prefix_kl_weight={elastic_args.prefix_kl_weight})"
+        if elastic_args.use_kd
+        else "DISABLED"
+    )
+    coral_str = (
+        f"enabled  (coral_weight={elastic_args.coral_weight})"
+        if elastic_args.use_coral
+        else "DISABLED"
+    )
+    sep = "=" * 64
+    print(
+        f"\n{sep}\n"
+        f"[FlexLLaVA] Elastic Training — Job Configuration\n"
+        f"  Vision Encoder : {ve}\n"
+        f"  LLM            : {llm}\n"
+        f"  Token budgets  : {tok_levels}  (teacher = tok{teacher_tok})\n"
+        f"  LoRA ranks     : {lora_ranks}\n"
+        f"  Training mode  : {mode}\n"
+        f"  KD loss        : {kd_str}\n"
+        f"  CORAL loss     : {coral_str}\n"
+        f"{sep}\n",
+        flush=True,
+    )
 
 
 # ---- defaults (used when args are not passed on the CLI) -----------------
@@ -66,6 +120,14 @@ def _parse_elastic_args():
                    help="Weight on the prefix-KL self-distillation loss term.")
     p.add_argument("--coral_weight", type=float, default=_DEFAULT_CORAL_WEIGHT,
                    help="Weight on the CORAL token-alignment loss term.")
+    p.add_argument("--use_kd", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=True, metavar="BOOL",
+                   help="Enable prefix-KL distillation (default True; pass False to disable).")
+    p.add_argument("--use_coral", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=True, metavar="BOOL",
+                   help="Enable CORAL alignment loss (default True; pass False to disable).")
+    p.add_argument("--n_sample_students", type=int, default=0, metavar="INT",
+                   help="Students sampled per step (0=full grid, 1=Option A, etc.).")
     elastic_args, remaining = p.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining  # hide elastic flags from HfArgumentParser
     return elastic_args
@@ -83,6 +145,9 @@ def main():
             f"--tok_levels length ({len(tok_levels)})"
         )
 
+    if os.environ.get("LOCAL_RANK", "0") == "0":
+        _print_config_banner(elastic_args, tok_levels, lora_ranks)
+
     m3train.ELASTIC_CONFIG = ElasticConfig(
         token_reduction="nested_query",
         tok_levels=tok_levels,
@@ -91,10 +156,11 @@ def main():
         lora_specialize_tok=True,
         lora_ranks=lora_ranks,
         lora_alpha=1.0,
-        use_prefix_kl=True,  prefix_kl_weight=elastic_args.prefix_kl_weight,
-        use_coral_align=True, coral_weight=elastic_args.coral_weight,
+        use_prefix_kl=elastic_args.use_kd,     prefix_kl_weight=elastic_args.prefix_kl_weight,
+        use_coral_align=elastic_args.use_coral, coral_weight=elastic_args.coral_weight,
         use_nested_dropout=True,
-        kl_teacher_tok_level=0,           # largest tok level is teacher
+        kl_teacher_tok_level=0,                 # largest tok level is teacher
+        n_sample_students=elastic_args.n_sample_students,
         log_adapter_every=50,
     )
 

@@ -61,6 +61,7 @@ class ElasticConfig:
     use_token_decorrelation: bool = False
     decorr_weight: float = 0.01
     kl_teacher_tok_level: int = 0        # index into tok_levels (highest = full)
+    n_sample_students: int = 0           # 0 = full grid; k>0 = teacher + k random students per step
     log_adapter_every: int = 0           # >0: log LoRA adapter divergence every N steps
 
     # ---- derived -------------------------------------------------------

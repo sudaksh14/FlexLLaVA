@@ -31,7 +31,8 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 1.0 \
     --coral_weight 0.1 \
-    --deepspeed ./scripts/zero3.json \
+    --n_sample_students 1 \
+    --deepspeed ./scripts/zero3_elastic.json \
     --model_name_or_path liuhaotian/llava-v1.5-7b \
     --pretrain_elastic_path /var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \
@@ -48,9 +49,9 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --bf16 True \
     --output_dir /var/scratch/skalra/flexllava/checkpoints/llava-elastic-finetune \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 2 \
-    --per_device_eval_batch_size 2 \
-    --gradient_accumulation_steps 32 \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 1 \
+    --gradient_accumulation_steps 64 \
     --optim adamw_bnb_8bit \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
@@ -64,6 +65,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --tf32 True \
     --model_max_length 1024 \
     --gradient_checkpointing True \
+    --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to wandb \
