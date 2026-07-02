@@ -85,6 +85,11 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         if elastic_args.use_coral
         else "DISABLED"
     )
+    llm_lora_enabled = _get_argv_value("--lora_enable").lower() not in ("false", "0", "no", "?")
+    if llm_lora_enabled:
+        llm_lora_str = f"enabled  (rank={_get_argv_value('--lora_r')}, alpha={_get_argv_value('--lora_alpha')})"
+    else:
+        llm_lora_str = "disabled (full fine-tune)"
     sep = "=" * 64
     print(
         f"\n{sep}\n"
@@ -94,6 +99,7 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         f"  Token budgets  : {tok_levels}  (teacher = tok{teacher_tok})\n"
         f"  LoRA ranks     : {lora_ranks}\n"
         f"  Training mode  : {mode}\n"
+        f"  LLM LoRA       : {llm_lora_str}\n"
         f"  KD loss        : {kd_str}\n"
         f"  CORAL loss     : {coral_str}\n"
         f"{sep}\n",
@@ -111,7 +117,7 @@ _DEFAULT_CORAL_WEIGHT    = 0.01
 def _parse_elastic_args():
     """Pre-parse only the elastic-specific flags, leaving everything else in
     sys.argv for HfArgumentParser inside m3train.train()."""
-    p = argparse.ArgumentParser(add_help=False)
+    p = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     p.add_argument("--tok_levels", type=int, nargs="+", default=_DEFAULT_TOK_LEVELS,
                    help="Visual-token budgets per level, descending (e.g. 256 144 64 16).")
     p.add_argument("--lora_ranks", type=int, nargs="+", default=_DEFAULT_LORA_RANKS,

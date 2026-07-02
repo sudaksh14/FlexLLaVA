@@ -117,6 +117,18 @@ class LlavaElasticMixin:
             if cfg.use_coral_align
             else "DISABLED"
         )
+        import sys as _sys
+        _argv = _sys.argv
+        def _av(key, default="?"):
+            try:
+                return _argv[_argv.index(key) + 1]
+            except (ValueError, IndexError):
+                return default
+        llm_lora_enabled = _av("--lora_enable", "False").lower() not in ("false", "0", "no")
+        if llm_lora_enabled:
+            llm_lora_str = f"enabled  (rank={_av('--lora_r', '?')}, alpha={_av('--lora_alpha', '?')})"
+        else:
+            llm_lora_str = "disabled (full fine-tune)"
         sep = "=" * 64
         print(
             f"\n{sep}\n"
@@ -126,6 +138,7 @@ class LlavaElasticMixin:
             f"  Token budgets  : {cfg.tok_levels}  (teacher = tok{teacher_tok})\n"
             f"  LoRA ranks     : {cfg.lora_ranks}\n"
             f"  Training mode  : {mode}\n"
+            f"  LLM LoRA       : {llm_lora_str}\n"
             f"  KD loss        : {kd_str}\n"
             f"  CORAL loss     : {coral_str}\n"
             f"{sep}\n",

@@ -238,7 +238,14 @@ def _load_elastic_pretrain_weights(model, path: str):
         rank0_print(f"[elastic] pretrain_elastic_path={path}: no elastic keys found in checkpoint")
         return
 
-    missing, unexpected = model.load_state_dict(elastic_sd, strict=False)
+    # When lora_enable=True the model is PEFT-wrapped; elastic modules were
+    # attached to the underlying model whose state_dict uses unprefixed keys.
+    try:
+        from peft import PeftModel as _PeftModel
+        target = model.base_model.model if isinstance(model, _PeftModel) else model
+    except ImportError:
+        target = model
+    missing, unexpected = target.load_state_dict(elastic_sd, strict=False)
     loaded = len(elastic_sd) - len(unexpected)
     elastic_missing = [k for k in missing if any(t in k for t in
                        ("elastic_resampler", "elastic_projector", "lora_A", "lora_B"))]

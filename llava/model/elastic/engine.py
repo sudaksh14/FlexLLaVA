@@ -147,8 +147,18 @@ def attach_elastic_engine(model, cfg):
 
     If cfg.use_lora, nested-LoRA must already be injected into the vision tower
     (e.g. via an ElasticVisionTower); otherwise the engine just modulates token
-    count. Registers resampler/projector as trainable submodules."""
-    vt = model.get_vision_tower()
+    count. Registers resampler/projector as trainable submodules.
+
+    PEFT-safe: if model is a PeftModel (lora_enable=True on LLM), the engine and
+    new modules are attached to the underlying LlavaLlamaForCausalLM so that
+    LlavaElasticMixin.forward (which runs as self=underlying) can find them."""
+    # Unwrap PEFT so elastic_engine lands on the object that runs forward()
+    try:
+        from peft import PeftModel as _PeftModel
+        underlying = model.base_model.model if isinstance(model, _PeftModel) else model
+    except ImportError:
+        underlying = model
+    vt = underlying.get_vision_tower()
     # If LoRA is requested but the (plain M3) tower can't switch levels, inject
     # rank-nested LoRA into its HF backbone and give it a set_level() method.
     if cfg.use_lora and not hasattr(vt, "set_level"):
@@ -162,9 +172,9 @@ def attach_elastic_engine(model, cfg):
             for w in _w:
                 w.set_level(lvl)
         vt.set_level = _set_level
-    engine = ElasticEngine(cfg, vt, vt.hidden_size, model.config.hidden_size)
+    engine = ElasticEngine(cfg, vt, vt.hidden_size, underlying.config.hidden_size)
     if engine.resampler is not None:
-        model.add_module("elastic_resampler", engine.resampler)
-    model.add_module("elastic_projector", engine.projector)
-    model.elastic_engine = engine
+        underlying.add_module("elastic_resampler", engine.resampler)
+    underlying.add_module("elastic_projector", engine.projector)
+    underlying.elastic_engine = engine
     return engine
