@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 import json
 import logging
 import pathlib
+import random
 from typing import Dict, Optional, Sequence, List
 
 import torch
@@ -764,6 +765,18 @@ class LazySupervisedDataset(Dataset):
         return length_list
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        # Some datasets (e.g. ocr_vqa) ship with a handful of missing/corrupt
+        # image files. Rather than let one bad sample kill a multi-hour run,
+        # fall back to a different random sample and keep going.
+        for _ in range(10):
+            try:
+                return self._get_item(i)
+            except (FileNotFoundError, OSError) as e:
+                rank0_print(f"[warn] skipping sample {i} ({self.list_data_dict[i].get('image')}): {e}")
+                i = random.randint(0, len(self.list_data_dict) - 1)
+        raise RuntimeError("Too many consecutive unreadable samples")
+
+    def _get_item(self, i) -> Dict[str, torch.Tensor]:
         sources = self.list_data_dict[i]
         if isinstance(i, int):
             sources = [sources]

@@ -31,7 +31,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 1.0 \
     --coral_weight 0.1 \
-    --n_sample_students 1 \
+    --n_sample_students 0 \
     --lora_enable True \
     --lora_r 128 \
     --lora_alpha 256 \
@@ -58,7 +58,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --optim adamw_bnb_8bit \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 50000 \
+    --save_steps 500 \
     --save_total_limit 1 \
     --learning_rate 2e-5 \
     --weight_decay 0. \
