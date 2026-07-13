@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as _checkpoint
 
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 
@@ -43,17 +44,53 @@ class CLIPVisionTower(nn.Module):
             raise ValueError(f'Unexpected select feature: {self.select_feature}')
         return image_features
 
-    @torch.no_grad()
-    def forward(self, images):
+    def _encode(self, images, l_enc):
+        # `l_enc` is (re-)applied here, as the first statement of this
+        # function, instead of relying on the caller having mutated shared
+        # LoRA-level state before calling forward(). HF's internal
+        # per-CLIPEncoderLayer gradient checkpointing (enabled transitively
+        # by model.gradient_checkpointing_enable() on the outer LLM, which
+        # does reach this nested CLIPVisionModel) recomputes activations
+        # during backward; if the level were only set externally beforehand,
+        # a later-processed level's mutation would already have overwritten
+        # it by the time an earlier level's checkpoint gets recomputed,
+        # silently training with the wrong LoRA rank. Setting it here, inside
+        # the (optionally outer-checkpointed) function body, means every
+        # recompute -- including HF's own nested per-layer recompute inside
+        # self.vision_tower -- sees the correct level, since this function
+        # always runs top-to-bottom before delegating into the inner model.
+        if l_enc is not None and hasattr(self, "set_level"):
+            self.set_level(l_enc)
+        image_forward_outs = self.vision_tower(images, output_hidden_states=True)
+        return self.feature_select(image_forward_outs)
+
+    def forward(self, images, l_enc=None):
+        # No blanket @torch.no_grad() here: the base CLIP backbone is frozen
+        # (requires_grad_(False) in load_model), so when no LoRA is injected
+        # autograd builds no graph through this module regardless (nothing in
+        # the subgraph requires grad) -- same effective behavior as no_grad,
+        # at zero extra cost. But when nested LoRA *is* injected (elastic
+        # engine attached with use_lora=True), its lora_A/lora_B need a real
+        # graph to receive gradients; no_grad here was silently preventing
+        # that in every run so far.
+        use_checkpoint = (l_enc is not None and hasattr(self, "set_level")
+                           and self.training and torch.is_grad_enabled())
         if type(images) is list:
             image_features = []
             for image in images:
-                image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
-                image_feature = self.feature_select(image_forward_out).to(image.dtype)
-                image_features.append(image_feature)
+                img = image.to(device=self.device, dtype=self.dtype).unsqueeze(0)
+                if use_checkpoint:
+                    feat = _checkpoint.checkpoint(self._encode, img, l_enc, use_reentrant=False)
+                else:
+                    feat = self._encode(img, l_enc)
+                image_features.append(feat.to(image.dtype))
         else:
-            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
-            image_features = self.feature_select(image_forward_outs).to(images.dtype)
+            img = images.to(device=self.device, dtype=self.dtype)
+            if use_checkpoint:
+                image_features = _checkpoint.checkpoint(self._encode, img, l_enc, use_reentrant=False)
+            else:
+                image_features = self._encode(img, l_enc)
+            image_features = image_features.to(images.dtype)
 
         return image_features
 
@@ -132,7 +169,10 @@ class CLIPVisionTowerS2(CLIPVisionTower):
         return image_features
 
     @torch.no_grad()
-    def forward(self, images):
+    def forward(self, images, l_enc=None):
+        # S2 multi-scale mode is not wired up for nested-LoRA specialization
+        # in this codebase (no training script here passes s2_scales); accept
+        # and ignore l_enc purely so callers can pass it unconditionally.
         if type(images) is list:
             image_features = []
             for image in images:

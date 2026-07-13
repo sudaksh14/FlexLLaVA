@@ -90,6 +90,13 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         llm_lora_str = f"enabled  (rank={_get_argv_value('--lora_r')}, alpha={_get_argv_value('--lora_alpha')})"
     else:
         llm_lora_str = "disabled (full fine-tune)"
+    if elastic_args.vision_lora_enable:
+        vt_lora_str = (
+            f"enabled  (ranks={lora_ranks}, "
+            f"{'specialized per tok_level' if elastic_args.vision_lora_specialize_tok else 'one shared adapter'})"
+        )
+    else:
+        vt_lora_str = "disabled (frozen, unspecialized vision tower)"
     sep = "=" * 64
     print(
         f"\n{sep}\n"
@@ -100,6 +107,7 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         f"  LoRA ranks     : {lora_ranks}\n"
         f"  Training mode  : {mode}\n"
         f"  LLM LoRA       : {llm_lora_str}\n"
+        f"  Vision LoRA    : {vt_lora_str}\n"
         f"  KD loss        : {kd_str}\n"
         f"  CORAL loss     : {coral_str}\n"
         f"{sep}\n",
@@ -134,6 +142,19 @@ def _parse_elastic_args():
                    help="Enable CORAL alignment loss (default True; pass False to disable).")
     p.add_argument("--n_sample_students", type=int, default=0, metavar="INT",
                    help="Students sampled per step (0=full grid, 1=Option A, etc.).")
+    p.add_argument("--vision_lora_enable", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=True, metavar="BOOL",
+                   help="Inject rank-nested LoRA into the vision tower (default True; "
+                        "pass False to run with a fully frozen, unspecialized vision "
+                        "tower -- token-budget reduction still happens, just without "
+                        "per-level encoder adapters).")
+    p.add_argument("--vision_lora_specialize_tok", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=True, metavar="BOOL",
+                   help="Tie the vision-tower LoRA adapter level to each tok_level "
+                        "(default True). If False but --vision_lora_enable is True, "
+                        "a single shared adapter (max rank) is used for all levels "
+                        "instead of one adapter per level. Ignored if "
+                        "--vision_lora_enable is False.")
     elastic_args, remaining = p.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining  # hide elastic flags from HfArgumentParser
     return elastic_args
@@ -158,8 +179,8 @@ def main():
         token_reduction="nested_query",
         tok_levels=tok_levels,
         num_query_tokens=tok_levels[0],   # full query bank = largest level
-        use_lora=True,
-        lora_specialize_tok=True,
+        use_lora=elastic_args.vision_lora_enable,
+        lora_specialize_tok=elastic_args.vision_lora_specialize_tok,
         lora_ranks=lora_ranks,
         lora_alpha=1.0,
         use_prefix_kl=elastic_args.use_kd,     prefix_kl_weight=elastic_args.prefix_kl_weight,

@@ -19,6 +19,11 @@
 # Submit: sbatch eval_lmms_job.sh [model_path]
 
 MODEL_PATH=${1:-/var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain}
+# Namespace by model: without this, two different checkpoints evaluated at
+# the same tok_level land in the same directory, and the summary table's
+# glob (which only filters by tok_level + benchmark) silently mixes results
+# from whichever model ran most recently.
+export MODEL_TAG=$(basename "$MODEL_PATH")
 LOG_ROOT=/var/scratch/skalra/flexllava/eval_logs
 TASKS="mme,pope,mmbench_en_dev,scienceqa_img,textvqa_val,gqa"
 
@@ -37,6 +42,23 @@ echo "Node: $(hostname)"
 nvidia-smi | head -12
 echo "Model: $MODEL_PATH"
 
+# Auto-detect the conversation template from the checkpoint's base LLM (see
+# eval_lmms_level.sh for why: the vicuna_v1 default is wrong for SLM
+# backbones trained with --version chatml/phi, and the mismatch is silent).
+BASE_LLM=$(python3 -c "
+import json
+try:
+    print(json.load(open('${MODEL_PATH}/config.json')).get('_name_or_path', '').lower())
+except Exception:
+    print('')
+")
+case "$BASE_LLM" in
+    *tinyllama*|*qwen*|*stablelm*) CONV_TEMPLATE="chatml" ;;
+    *phi*)                         CONV_TEMPLATE="phi" ;;
+    *)                              CONV_TEMPLATE="vicuna_v1" ;;
+esac
+echo "Base LLM: $BASE_LLM  →  conv_template=${CONV_TEMPLATE}"
+
 # Install lmms-eval into the env if not already done
 pip show lmms-eval >/dev/null 2>&1 || pip install -e lmms-eval -q
 
@@ -44,7 +66,7 @@ TOK_LABELS=("256tok" "144tok" "64tok" "16tok")
 
 for LEVEL in 0 1 2 3; do
     LABEL=${TOK_LABELS[$LEVEL]}
-    OUTDIR="${LOG_ROOT}/${LABEL}"
+    OUTDIR="${LOG_ROOT}/${MODEL_TAG}/${LABEL}"
     mkdir -p "$OUTDIR"
 
     echo ""
@@ -55,7 +77,7 @@ for LEVEL in 0 1 2 3; do
     accelerate launch --num_processes=1 \
         -m lmms_eval \
         --model       llava_elastic \
-        --model_args  "pretrained=${MODEL_PATH},tok_level=${LEVEL},device_map=cuda:0" \
+        --model_args  "pretrained=${MODEL_PATH},tok_level=${LEVEL},device_map=cuda:0,conv_template=${CONV_TEMPLATE}" \
         --tasks       "$TASKS" \
         --batch_size  1 \
         --log_samples \
@@ -71,7 +93,7 @@ SUMMARY="./lmms-eval/eval_lmms_summary_${SLURM_JOB_ID}.txt"
 python3 - <<'PYEOF' | tee "$SUMMARY"
 import json, glob, os
 
-log_root = "/var/scratch/skalra/flexllava/eval_logs"
+log_root = os.path.join("/var/scratch/skalra/flexllava/eval_logs", os.environ["MODEL_TAG"])
 labels   = ["256tok", "144tok", "64tok", "16tok"]
 benchmarks = ["mme", "pope", "mmbench_en_dev", "scienceqa_img", "textvqa_val", "gqa"]
 

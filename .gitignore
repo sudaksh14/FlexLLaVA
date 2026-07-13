@@ -23,6 +23,7 @@ dist
 wandb
 output
 jobs
+debug
 
 checkpoints
 ckpts*

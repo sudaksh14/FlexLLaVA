@@ -139,8 +139,8 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images)
+    def encode_images(self, images, l_enc=None):
+        image_features = self.get_model().get_vision_tower()(images, l_enc=l_enc)
         # When the elastic engine is active it owns the full vision→LLM projection
         # (resampler in CLIP space + its own projector). Skip the base mm_projector
         # so image_features stay in CLIP space (vision_dim) for the resampler.
@@ -175,19 +175,24 @@ class LlavaMetaForCausalLM(ABC):
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
-        # For elastic LoRA specialization: set the adapter level BEFORE running
-        # the vision tower so the correct lora_A/lora_B slice is active.
+        # For elastic LoRA specialization: resolve the adapter level and pass
+        # it explicitly into encode_images -> vision tower, instead of
+        # mutating shared module state ahead of the call. The vision tower
+        # re-applies this value inside its own (possibly checkpointed)
+        # forward, so backward's recompute always uses the same level that
+        # produced the original activations -- see CLIPVisionTower._encode.
+        l_enc = None
         if matryoshka_vis_token_scale is not None:
             _eng = getattr(self, "elastic_engine", None)
             if (_eng is not None and _eng.cfg.use_lora
                     and _eng.cfg.lora_specialize_tok):
-                _eng._set_lora_level(matryoshka_vis_token_scale)
+                l_enc = _eng.cfg.lora_level_for_tok(matryoshka_vis_token_scale)
 
         if type(images) is list or images.ndim == 5:
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
             concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images)
+            image_features = self.encode_images(concat_images, l_enc=l_enc)
             split_sizes = [image.shape[0] for image in images]
             if matryoshka_vis_token_scale != None:
                 image_features = self.matryoshka_vis_token_process(image_features, matryoshka_vis_token_scale)
@@ -235,7 +240,7 @@ class LlavaMetaForCausalLM(ABC):
             else:
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
-            image_features = self.encode_images(images)
+            image_features = self.encode_images(images, l_enc=l_enc)
             if matryoshka_vis_token_scale != None:
                 image_features = self.matryoshka_vis_token_process(image_features, matryoshka_vis_token_scale)
                 

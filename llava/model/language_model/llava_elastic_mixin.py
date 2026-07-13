@@ -147,6 +147,41 @@ class LlavaElasticMixin:
         self._elastic_banner_printed = True
 
     # ------------------------------------------------------------------
+    # Lightweight NaN/Inf/saturation health check for the elastic loss path.
+    #
+    # A real 7B run (job 25727) silently collapsed to a permanent, exact
+    # loss=0.0 with a frozen non-zero grad_norm at step 1489/5197, no crash,
+    # no error, no NaN visible in the printed loss -- and by the time it was
+    # noticed (job killed by SLURM time limit ~2600 steps later) there was no
+    # way to tell whether the underlying tensors had gone NaN/Inf or whether
+    # logits had saturated (extreme-but-finite values pushing softmax to a
+    # degenerate one-hot distribution, which also yields exact 0.0 CE). This
+    # prints the first time either happens (rank0 only), then throttles to
+    # avoid spamming thousands of lines if the state persists.
+    # ------------------------------------------------------------------
+    def _health_check(self, name, *tensors, step_gap: int = 200):
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+        counters = self.__dict__.setdefault("_health_check_counters", {})
+        for t in tensors:
+            if t is None:
+                continue
+            n = counters.get(name, 0)
+            counters[name] = n + 1
+            if not torch.isfinite(t).all():
+                if n == 0 or n % step_gap == 0:
+                    n_nan = torch.isnan(t).sum().item()
+                    n_inf = torch.isinf(t).sum().item()
+                    print(f"[health] NON-FINITE in {name} (occurrence #{n+1}): "
+                          f"nan={n_nan} inf={n_inf} shape={tuple(t.shape)}", flush=True)
+            else:
+                m = t.abs().max().item()
+                if m > 1e4 and (n == 0 or n % step_gap == 0):
+                    print(f"[health] LARGE MAGNITUDE in {name} (occurrence #{n+1}): "
+                          f"max|.|={m:.3e} shape={tuple(t.shape)}", flush=True)
+
+    # ------------------------------------------------------------------
     # Full forward: elastic grid / pure-M3 / standard eval
     # ------------------------------------------------------------------
     def forward(
@@ -199,7 +234,15 @@ class LlavaElasticMixin:
             n_active = len(active_levels)
 
             for l_tok in active_levels:
-                engine._set_lora_level(l_tok)
+                # NOTE: the LoRA level is resolved and applied inside
+                # prepare_inputs_labels_for_multimodal -> encode_images ->
+                # CLIPVisionTower, as an explicit argument threaded through
+                # the (checkpointed) vision tower call. Do NOT eagerly mutate
+                # engine/vision_tower level state here: with gradient
+                # checkpointing active (it does reach the CLIP encoder --
+                # verified), backward recomputes an earlier iteration's
+                # activations after this loop has already moved `.level`
+                # forward, silently using the wrong LoRA rank.
                 loss_item, logits, outputs = self.forward_single_matryoshka(
                     input_ids=input_ids, attention_mask=attention_mask,
                     position_ids=position_ids, past_key_values=past_key_values,
@@ -211,6 +254,8 @@ class LlavaElasticMixin:
                 )
                 n_tok = cfg.tok_levels[l_tok]
                 tag = f"tok{n_tok}"
+                self._health_check(f"logits_{tag}", logits)
+                self._health_check(f"ce_loss_{tag}", loss_item)
                 per_level[f"loss/ce_{tag}"] = loss_item.item()
                 loss += loss_item / n_active
                 ce_total += loss_item.item() / n_active
@@ -228,6 +273,7 @@ class LlavaElasticMixin:
                             L = min(n, labels.shape[1])
                             kl_labels = labels[:, labels.shape[1] - L:]
                         kl = _el.prefix_kl_loss(s_log, t_log, kl_labels)
+                        self._health_check(f"kl_{tag}", kl)
                         kl_weighted = cfg.prefix_kl_weight * kl / n_active
                         kl_total += kl_weighted.item()
                         per_level[f"loss/kl_{tag}"] = kl.item()

@@ -31,7 +31,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 1.0 \
     --coral_weight 0.1 \
-    --n_sample_students 0 \
+    --n_sample_students 1 \
     --lora_enable True \
     --lora_r 128 \
     --lora_alpha 256 \

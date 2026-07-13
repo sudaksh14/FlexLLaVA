@@ -19,8 +19,13 @@ LEVEL=$SLURM_ARRAY_TASK_ID
 
 TOK_LABELS=("256tok" "144tok" "64tok" "16tok")
 LABEL=${TOK_LABELS[$LEVEL]}
+# Namespace by model: without this, two different checkpoints evaluated at
+# the same tok_level land in the same directory, and the summary script's
+# glob (which only filters by tok_level + benchmark) silently mixes results
+# from whichever model ran most recently.
+MODEL_TAG=$(basename "$MODEL_PATH")
 LOG_ROOT=/var/scratch/skalra/flexllava/eval_logs
-OUTDIR="${LOG_ROOT}/${LABEL}"
+OUTDIR="${LOG_ROOT}/${MODEL_TAG}/${LABEL}"
 TASKS="mme,pope,mmbench_en_dev,scienceqa_img,textvqa_val,gqa"
 
 module load cuda12.6/toolkit/12.6
@@ -50,6 +55,26 @@ else
 fi
 echo "GPU: $GPU_NAME  →  batch_size=${BATCH_SIZE}"
 
+# Auto-detect the conversation template from the checkpoint's base LLM.
+# lmms-eval's Llava/LlavaElastic wrapper defaults to vicuna_v1, which is only
+# correct for the original llava-v1.5-7b checkpoints. SLM backbones were
+# trained with --version chatml (TinyLlama/Qwen/StableLM) or phi (Phi-2) --
+# using the wrong template at eval time doesn't error, it silently feeds the
+# model prompts formatted differently than what it was finetuned on.
+BASE_LLM=$(python3 -c "
+import json
+try:
+    print(json.load(open('${MODEL_PATH}/config.json')).get('_name_or_path', '').lower())
+except Exception:
+    print('')
+")
+case "$BASE_LLM" in
+    *tinyllama*|*qwen*|*stablelm*) CONV_TEMPLATE="chatml" ;;
+    *phi*)                         CONV_TEMPLATE="phi" ;;
+    *)                              CONV_TEMPLATE="vicuna_v1" ;;
+esac
+echo "Base LLM: $BASE_LLM  →  conv_template=${CONV_TEMPLATE}"
+
 pip show lmms-eval >/dev/null 2>&1 || pip install -e lmms-eval -q
 
 mkdir -p "$OUTDIR"
@@ -62,7 +87,7 @@ echo "════════════════════════�
 accelerate launch --num_processes=1 \
     -m lmms_eval \
     --model       llava_elastic \
-    --model_args  "pretrained=${MODEL_PATH},tok_level=${LEVEL},device_map=cuda:0" \
+    --model_args  "pretrained=${MODEL_PATH},tok_level=${LEVEL},device_map=cuda:0,conv_template=${CONV_TEMPLATE}" \
     --tasks       "$TASKS" \
     --batch_size  $BATCH_SIZE \
     --log_samples \
