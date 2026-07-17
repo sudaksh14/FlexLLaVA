@@ -10,8 +10,9 @@
 # FlexLLaVA evaluation via lmms-eval (same framework as AdaLLaVA).
 # Evaluates all 4 token levels on 6 benchmarks; datasets auto-download from HF.
 #
-# Benchmarks (matching AdaLLaVA paper protocol):
-#   mme · pope · mmbench_en_dev · scienceqa_img · textvqa_val · gqa
+# Benchmarks (matching AdaLLaVA paper protocol, minus mmbench_en_dev --
+# excluded, see TASKS below):
+#   mme · pope · scienceqa_img · textvqa_val · gqa
 #
 # Data downloads to HF_HOME/datasets (~15 GB total, cached across runs).
 # No manual data preparation required.
@@ -25,7 +26,10 @@ MODEL_PATH=${1:-/var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain
 # from whichever model ran most recently.
 export MODEL_TAG=$(basename "$MODEL_PATH")
 LOG_ROOT=/var/scratch/skalra/flexllava/eval_logs
-TASKS="mme,pope,mmbench_en_dev,scienceqa_img,textvqa_val,gqa"
+# mmbench_en_dev excluded: its gpt_eval_score requires OPENAI_API_KEY, which
+# isn't configured anywhere in this environment -- without it the judge call
+# fails and falls back to a meaningless placeholder score, not a real result.
+TASKS="mme,pope,scienceqa_img,textvqa_val,gqa"
 
 module load cuda12.6/toolkit/12.6
 
@@ -95,13 +99,12 @@ import json, glob, os
 
 log_root = os.path.join("/var/scratch/skalra/flexllava/eval_logs", os.environ["MODEL_TAG"])
 labels   = ["256tok", "144tok", "64tok", "16tok"]
-benchmarks = ["mme", "pope", "mmbench_en_dev", "scienceqa_img", "textvqa_val", "gqa"]
+benchmarks = ["mme", "pope", "scienceqa_img", "textvqa_val", "gqa"]
 
 # AdaLLaVA paper numbers (latency=0.85, LLaVA-v1.5-7b, Table 2)
 ada = {
     "mme":           "1487.2 / 324.6",
     "pope":          "85.9",
-    "mmbench_en_dev":"68.0",
     "scienceqa_img": "70.4",
     "textvqa_val":   "58.1",
     "gqa":           "62.0",

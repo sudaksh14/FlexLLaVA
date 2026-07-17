@@ -26,7 +26,10 @@ LABEL=${TOK_LABELS[$LEVEL]}
 MODEL_TAG=$(basename "$MODEL_PATH")
 LOG_ROOT=/var/scratch/skalra/flexllava/eval_logs
 OUTDIR="${LOG_ROOT}/${MODEL_TAG}/${LABEL}"
-TASKS="mme,pope,mmbench_en_dev,scienceqa_img,textvqa_val,gqa"
+# mmbench_en_dev excluded: its gpt_eval_score requires OPENAI_API_KEY, which
+# isn't configured anywhere in this environment -- without it the judge call
+# fails and falls back to a meaningless placeholder score, not a real result.
+TASKS="mme,pope,scienceqa_img,textvqa_val,gqa"
 
 module load cuda12.6/toolkit/12.6
 

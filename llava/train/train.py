@@ -646,6 +646,19 @@ def preprocess_mpt(
             cur_len += round_len
         target[cur_len:] = IGNORE_INDEX
 
+        # re_rounds intentionally drops the conversation's final trailing
+        # conv.sep (that's what produces the empty terminating split that
+        # ends the loop above), but total_len is measured on the ORIGINAL
+        # fully tokenized conversation, which does include it. Without
+        # accounting for that fixed, structural gap, cur_len never equals
+        # total_len for ANY sample -- the mismatch check below would fire
+        # unconditionally and fully mask every example's labels.
+        if has_image:
+            trailing_sep_len = len(tokenizer_image_token(conv.sep, tokenizer)) - 1
+        else:
+            trailing_sep_len = len(tokenizer(conv.sep).input_ids) - 1
+        cur_len += trailing_sep_len
+
         if cur_len < tokenizer.model_max_length:
             if cur_len != total_len:
                 target[:] = IGNORE_INDEX
@@ -694,13 +707,20 @@ def preprocess(
     3. Tokenize the concatenated conversation;
     4. Make a deepcopy as the target. Mask human words with IGNORE_INDEX.
     """
+    # Dispatch on sep_style (what preprocess_v1/preprocess_mpt actually assert
+    # against), not the arbitrary `version` string name. Conversation templates
+    # like chatml/phi share sep_style with v1/mpt but have their own `version`
+    # names, which used to fall through to the generic fallback below -- that
+    # fallback never emits the template's real turn-end token (e.g. chatml's
+    # <|im_end|>), so every model trained with a non-"v1"/non-"mpt" version
+    # string learned a mangled prompt format it was never evaluated with.
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.PLAIN:
         return preprocess_plain(sources, tokenizer)
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
-    if conversation_lib.default_conversation.version.startswith("v1"):
+    if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.TWO:
         return preprocess_v1(sources, tokenizer, has_image=has_image)
-    if conversation_lib.default_conversation.version == "mpt":
+    if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.MPT:
         return preprocess_mpt(sources, tokenizer, has_image=has_image)
     # add end signal and concatenate together
     conversations = []
@@ -973,7 +993,20 @@ def train(attn_implementation=None):
             torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
             **bnb_model_from_pretrained_args
         )
-        
+
+    # Some base checkpoints (e.g. lmsys/vicuna-7b-v1.5) ship a generation_config
+    # with do_sample=False alongside leftover sample-only fields (temperature,
+    # top_p) from an older HF convention. Newer transformers versions treat
+    # that combination as an outright error (not just a warning) when
+    # save_pretrained() validates the config -- which crashes training the
+    # first time it tries to save a checkpoint, well after training itself
+    # has been running fine. Clear the now-irrelevant fields up front so later
+    # saves don't hit invalid state.
+    if getattr(model.generation_config, "do_sample", True) is False:
+        for _field in ("temperature", "top_p", "top_k"):
+            if getattr(model.generation_config, _field, None) is not None:
+                setattr(model.generation_config, _field, None)
+
     matryoshka_vis_token_scale = getattr(model_args, 'matryoshka_vis_token_scale', None)
     model.model.config.matryoshka_vis_token_scale = list_of_integers(matryoshka_vis_token_scale)
     model.config.use_cache = False
