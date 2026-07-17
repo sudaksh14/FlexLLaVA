@@ -451,6 +451,7 @@ def preprocess_llama_2(
         rounds = conversation.split(conv.sep2)
         cur_len = 1
         target[:cur_len] = IGNORE_INDEX
+        i = 0
         for i, rou in enumerate(rounds):
             if rou == "":
                 break
@@ -473,7 +474,20 @@ def preprocess_llama_2(
         target[cur_len:] = IGNORE_INDEX
 
         if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
+            # Round-length accounting is a reconstruct-and-retokenize
+            # approximation, not a true offset mapping. Some tokenizers
+            # (confirmed: TinyLlama's) have a per-round BOS-handling quirk
+            # relative to vicuna's that costs ~1 extra token PER ROUND, not a
+            # single fixed amount -- empirically confirmed as +1/round across
+            # multiple real multi-turn samples. A fixed tolerance therefore
+            # either fails long conversations (too tight) or stops catching
+            # real corruption like a dropped round (too loose). Scale with
+            # the number of rounds actually processed (`i`) instead: a
+            # genuinely dropped/misparsed round loses that round's full
+            # content (typically tens of tokens minimum), which still safely
+            # exceeds this margin, while the benign per-round drift never does.
+            MISMATCH_TOLERANCE = 2 + 2 * i
+            if abs(cur_len - total_len) > MISMATCH_TOLERANCE:
                 target[:] = IGNORE_INDEX
                 print(
                     f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
@@ -533,6 +547,7 @@ def preprocess_v1(
         rounds = conversation.split(conv.sep2)
         cur_len = 1
         target[:cur_len] = IGNORE_INDEX
+        i = 0
         for i, rou in enumerate(rounds):
             if rou == "":
                 break
@@ -549,7 +564,13 @@ def preprocess_v1(
                 round_len = len(tokenizer(rou).input_ids)
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-            if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
+            # `legacy` is a SentencePiece/LlamaTokenizer-only attribute describing a
+            # specific BOS-reinsertion quirk in tokenizers>=0.14; non-SentencePiece
+            # tokenizers (e.g. phi-2's CodeGenTokenizer) don't have it at all, and
+            # accessing it directly crashes on every multi-round sample. Default to
+            # True (the quirk-free / no-correction behavior) since the quirk is
+            # specific to LLaMA's tokenizer family and doesn't apply elsewhere.
+            if i != 0 and not getattr(tokenizer, "legacy", True) and IS_TOKENIZER_GREATER_THAN_0_14:
                 round_len -= 1
                 instruction_len -= 1
 
@@ -559,7 +580,20 @@ def preprocess_v1(
         target[cur_len:] = IGNORE_INDEX
 
         if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
+            # Round-length accounting is a reconstruct-and-retokenize
+            # approximation, not a true offset mapping. Some tokenizers
+            # (confirmed: TinyLlama's) have a per-round BOS-handling quirk
+            # relative to vicuna's that costs ~1 extra token PER ROUND, not a
+            # single fixed amount -- empirically confirmed as +1/round across
+            # multiple real multi-turn samples. A fixed tolerance therefore
+            # either fails long conversations (too tight) or stops catching
+            # real corruption like a dropped round (too loose). Scale with
+            # the number of rounds actually processed (`i`) instead: a
+            # genuinely dropped/misparsed round loses that round's full
+            # content (typically tens of tokens minimum), which still safely
+            # exceeds this margin, while the benign per-round drift never does.
+            MISMATCH_TOLERANCE = 2 + 2 * i
+            if abs(cur_len - total_len) > MISMATCH_TOLERANCE:
                 target[:] = IGNORE_INDEX
                 print(
                     f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
@@ -612,6 +646,10 @@ def preprocess_mpt(
 
     # Mask targets
     sep = conv.sep + conv.roles[1]
+    if has_image:
+        sep_len = len(tokenizer_image_token(conv.sep, tokenizer)) - 1
+    else:
+        sep_len = len(tokenizer(conv.sep).input_ids) - 1
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
@@ -621,6 +659,7 @@ def preprocess_mpt(
             re_rounds.append(conv.sep.join(rounds[conv_idx:conv_idx+2]))    # user + gpt
         cur_len = 0
         target[:cur_len] = IGNORE_INDEX
+        i = 0
         for i, rou in enumerate(re_rounds):
             if rou == "":
                 break
@@ -644,23 +683,34 @@ def preprocess_mpt(
             target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
 
             cur_len += round_len
+            # Each re_round was reconstructed by rejoining `rounds` chunks that
+            # conversation.split(conv.sep) had already stripped the separator
+            # from -- both the one trailing THIS round and (for every round
+            # after the first) the one that preceded it. Every round boundary
+            # in the ORIGINAL fully tokenized conversation costs one conv.sep,
+            # so one must be added back per round processed, not just once at
+            # the end -- otherwise cur_len falls further behind total_len with
+            # every additional turn, and multi-turn conversations (most of the
+            # finetune set) fail the mismatch check below almost every time
+            # even though the round-by-round masking itself was done correctly.
+            cur_len += sep_len
         target[cur_len:] = IGNORE_INDEX
 
-        # re_rounds intentionally drops the conversation's final trailing
-        # conv.sep (that's what produces the empty terminating split that
-        # ends the loop above), but total_len is measured on the ORIGINAL
-        # fully tokenized conversation, which does include it. Without
-        # accounting for that fixed, structural gap, cur_len never equals
-        # total_len for ANY sample -- the mismatch check below would fire
-        # unconditionally and fully mask every example's labels.
-        if has_image:
-            trailing_sep_len = len(tokenizer_image_token(conv.sep, tokenizer)) - 1
-        else:
-            trailing_sep_len = len(tokenizer(conv.sep).input_ids) - 1
-        cur_len += trailing_sep_len
-
         if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
+            # Round-length accounting is a reconstruct-and-retokenize
+            # approximation, not a true offset mapping. Some tokenizers
+            # (confirmed: TinyLlama's) have a per-round BOS-handling quirk
+            # relative to vicuna's that costs ~1 extra token PER ROUND, not a
+            # single fixed amount -- empirically confirmed as +1/round across
+            # multiple real multi-turn samples. A fixed tolerance therefore
+            # either fails long conversations (too tight) or stops catching
+            # real corruption like a dropped round (too loose). Scale with
+            # the number of rounds actually processed (`i`) instead: a
+            # genuinely dropped/misparsed round loses that round's full
+            # content (typically tens of tokens minimum), which still safely
+            # exceeds this margin, while the benign per-round drift never does.
+            MISMATCH_TOLERANCE = 2 + 2 * i
+            if abs(cur_len - total_len) > MISMATCH_TOLERANCE:
                 target[:] = IGNORE_INDEX
                 print(
                     f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."

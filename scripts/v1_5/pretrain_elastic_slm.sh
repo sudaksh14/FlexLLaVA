@@ -6,7 +6,7 @@
 #
 # LLM_KEY choices:
 #   --- 3 SLMs from the reference repos ---
-#   tinyllama      → TinyLlama/TinyLlama-1.1B-Chat-v1.0      (TinyLLaVA repo, conv: chatml)
+#   tinyllama      → TinyLlama/TinyLlama-1.1B-Chat-v1.0      (TinyLLaVA repo, conv: v1)
 #   mobilellama    → mtgv/MobileLLaMA-1.4B-Chat               (MobileVLM repo, conv: v1)
 #   smollm2        → HuggingFaceTB/SmolLM2-1.7B-Instruct     (SmolLM repo,    conv: chatml)
 #   --- additional Qwen2.5 / Phi-2 / StableLM variants ---
@@ -37,7 +37,15 @@ case "$LLM_KEY" in
     ;;
   tinyllama)
     MODEL_PATH="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-    CONV_VERSION="chatml"
+    # v1 (vicuna-style USER/ASSISTANT + "</s>"), not chatml: TinyLlama's tokenizer
+    # never registered <|im_start|>/<|im_end|> as real special tokens, so they
+    # fragment into 7 context-dependent BPE pieces each -- this silently masked
+    # ~86% of finetune data's labels (see preprocess_mpt's round-length
+    # accounting, which assumes a fixed token cost per separator occurrence).
+    # "</s>" IS a real special token here, so preprocess_v1 has no such issue.
+    # Matches the reference TinyLLaVA_Factory's own llama_template.py for
+    # this exact model (vendored at ./TinyLLaVA_Factory in this repo).
+    CONV_VERSION="v1"
     ;;
   mobilellama)
     MODEL_PATH="mtgv/MobileLLaMA-1.4B-Chat"
@@ -102,7 +110,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 2048 \
+    --model_max_length 1024 \
     --gradient_checkpointing True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \

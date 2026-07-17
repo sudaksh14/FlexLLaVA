@@ -55,7 +55,6 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 32 \
-    --optim adamw_bnb_8bit \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \

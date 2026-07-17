@@ -364,6 +364,26 @@ class LLaVATrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
 
+        # A NaN/Inf loss (e.g. from a log(0) edge case in prefix_kl_loss/
+        # coral_loss on a rare batch) must never reach backward() as-is: DeepSpeed's
+        # own overflow detection is not reliable with every optimizer (confirmed
+        # untested with adamw_bnb_8bit, see its own startup warning), and once a
+        # NaN gradient gets applied to a shared weight, every subsequent forward
+        # pass on any input produces NaN forever -- permanent, silent corruption
+        # for the rest of the run. Replace the loss with a zero-connected dummy
+        # (still linked to every trainable param, so backward() populates real
+        # zero gradients rather than reusing the poisoned graph) so this batch
+        # contributes nothing to the accumulated gradient instead of destroying it.
+        if not torch.isfinite(loss):
+            import torch.distributed as dist
+            if not (dist.is_initialized() and dist.get_rank() != 0):
+                print(f"[health] NON-FINITE total loss at step {self.state.global_step} "
+                      f"-- skipping this batch's gradient contribution (zeroed, not applied).",
+                      flush=True)
+            zero = torch.zeros((), device=loss.device, dtype=loss.dtype)
+            dummy = sum((p.float().sum() for p in model.parameters() if p.requires_grad), zero)
+            loss = dummy * 0.0
+
         # Log elastic component losses + perplexity if the forward populated them.
         components = getattr(model, "_loss_components", None)
         if components is not None:

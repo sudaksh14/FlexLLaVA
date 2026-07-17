@@ -29,7 +29,8 @@ case "$LLM_KEY" in
     ;;
   tinyllama)
     MODEL_PATH="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-    CONV_VERSION="chatml"
+    # See scripts/v1_5/pretrain_elastic_slm.sh for why this is v1, not chatml.
+    CONV_VERSION="v1"
     ;;
   mobilellama)
     MODEL_PATH="mtgv/MobileLLaMA-1.4B-Chat"
