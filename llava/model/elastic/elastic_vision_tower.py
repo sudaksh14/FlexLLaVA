@@ -52,7 +52,7 @@ class ElasticVisionTower(nn.Module):
             return
         self._load_backbone(device_map)
         self.vision_tower.requires_grad_(False)
-        if self.cfg.has_vision_elasticity:
+        if self.cfg.use_lora:
             self.lora_wrappers = inject_nested_lora(
                 self.vision_tower,
                 self._lora_targets(),
@@ -60,6 +60,9 @@ class ElasticVisionTower(nn.Module):
                 alpha=self.cfg.lora_alpha,
                 dropout=self.cfg.lora_dropout,
             )
+            # engine.adapter_stats() looks for `_lora_wrappers`; keep both names
+            # pointing at the same list so per-level norm logging works here too.
+            self._lora_wrappers = self.lora_wrappers
         self.is_loaded = True
 
     def set_level(self, l_enc: int) -> None:
