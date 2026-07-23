@@ -209,6 +209,13 @@ class LlavaElasticMixin:
             self._maybe_print_elastic_banner(engine)
 
             cfg = engine.cfg
+            # Bump the per-forward counter once, up front. It seeds every per-step
+            # random draw below (student sampling here, nested-dropout truncation in
+            # engine.reduce_tokens) so all DDP ranks make identical choices and run
+            # identical collective schedules -- the fix for the step-136 NCCL
+            # deadlock. Identical across ranks (lockstep forwards) and stable
+            # through the checkpointed backward recompute.
+            engine._fwd_step += 1
             loss = 0
             ce_total = 0.0
             kl_total = 0.0
@@ -226,7 +233,12 @@ class LlavaElasticMixin:
             n_sample = cfg.n_sample_students
             students_all = [l for l in grid if l != cfg.kl_teacher_tok_level]
             if 0 < n_sample < len(students_all):
-                sampled_students = random.sample(students_all, k=n_sample)
+                # Seed from the shared per-forward counter so both ranks sample the
+                # SAME students -> same set of levels -> same collective schedule.
+                # (Uncoordinated random.sample here would desync ranks in
+                # sample-student mode, the 7B analogue of the nested-dropout desync.)
+                _srng = random.Random(engine._fwd_step * 2654435761)
+                sampled_students = _srng.sample(students_all, k=n_sample)
                 active_levels = [cfg.kl_teacher_tok_level] + sampled_students
             else:
                 sampled_students = None

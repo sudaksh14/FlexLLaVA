@@ -25,6 +25,17 @@ echo -n nproc=; nproc
 export NCCL_SOCKET_TIMEOUT=3600
 export NCCL_DEBUG=WARN
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# run_26187/26205/26209 all deadlocked identically at step 136 (SeqNum=877060):
+# the two ranks are stuck on DIFFERENT-sized collectives (65M vs 2048) = a rank
+# desync in the overlapped gradient reduction, not a straggler. Fixes:
+#   - overlap_comm:false in zero2.json serializes reduction (removes the desync).
+#   - NCCL_ASYNC_ERROR_HANDLING=1 (torch 2.1.2 name; not the TORCH_ prefix) makes
+#     the watchdog tear the job down promptly on timeout instead of hanging.
+#   - --ddp_timeout in the training script fires the watchdog at 15 min instead
+#     of the 30 min default, so a repeat desync fails faster.
+# NOTE: DEEPSPEED_TIMEOUT was tried and had no effect -- the process-group
+# timeout comes from HF's ddp_timeout via Accelerate, not that env var.
+export NCCL_ASYNC_ERROR_HANDLING=1
 
 export WANDB_PROJECT="FlexLLaVA"
 export WANDB_DIR=/var/scratch/skalra/flexllava/wandb

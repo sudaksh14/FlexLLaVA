@@ -68,6 +68,11 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 0.1 \
     --coral_weight 0.1 \
+    --lora_enable True \
+    --lora_r 128 \
+    --lora_alpha 256 \
+    --mm_projector_lr 2e-5 \
+    --mm_vision_tower_lr 2e-5 \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path "${MODEL_PATH}" \
     --pretrain_elastic_path "${PRETRAIN_CKPT}" \
@@ -92,13 +97,14 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --save_strategy "steps" \
     --save_steps 500 \
     --save_total_limit 1 \
-    --learning_rate 2e-5 \
+    --learning_rate 2e-4 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 1024 \
+    --model_max_length 2048 \
+    --ddp_timeout 900 \
     --gradient_checkpointing True \
     --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
     --dataloader_num_workers 4 \

@@ -16,6 +16,57 @@ from transformers.trainer_pt_utils import get_length_grouped_indices as get_leng
 from typing import List, Optional
 
 
+def _patch_bf16_optimizer_overflow_guard():
+    """DeepSpeed's fp16 ZeRO optimizer skips the update and clears grads when it
+    detects a non-finite gradient (has_overflow/_update_scale). Its BF16_Optimizer
+    has no equivalent: bf16_optimizer.py's step() computes the global grad norm,
+    asserts it is > 0 (which raises if the norm is NaN, but silently proceeds --
+    corrupting every parameter via clip_tensors_by_global_norm -- if it's +inf,
+    since 1/inf clips to 0... except when a handful of individual grads are NaN
+    without pushing the norm itself into a comparison that trips the assert).
+    Bottom line: this path was seen letting a single bad micro-batch permanently
+    NaN the whole model (see run_26204, step 54) with no crash and no skip.
+    Patch step() to explicitly check the norm for finiteness first and, if not
+    finite, clear gradients and skip the update -- mirroring the fp16 behavior.
+    """
+    from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
+    from deepspeed.runtime.utils import get_global_norm_of_tensors, clip_tensors_by_global_norm
+
+    @torch.no_grad()
+    def guarded_step(self, closure=None):
+        if closure is not None:
+            raise NotImplementedError(f'{self.__class__} does not support closure.')
+
+        all_groups_norm = get_global_norm_of_tensors(input_tensors=self.get_grads_for_norm(),
+                                                       mpu=self.mpu,
+                                                       norm_type=self.norm_type,
+                                                       use_graph=self.graph_harvesting)
+        if not torch.isfinite(torch.as_tensor(float(all_groups_norm))):
+            print(f"[bf16-guard] non-finite global grad norm ({all_groups_norm}) -- "
+                  f"skipping optimizer step and clearing gradients instead of "
+                  f"applying/crashing.", flush=True)
+            self.clear_hp_grads()
+            return
+
+        self._global_grad_norm = all_groups_norm
+        assert all_groups_norm > 0.
+        if self.clip_grad > 0.:
+            clip_tensors_by_global_norm(input_tensors=self.get_grads_for_norm(for_clipping=True),
+                                         max_norm=self.clip_grad,
+                                         global_norm=all_groups_norm,
+                                         mpu=self.mpu,
+                                         use_graph=self.graph_harvesting)
+
+        self.optimizer.step()
+        self.update_lp_params()
+        self.clear_hp_grads()
+
+    BF16_Optimizer.step = guarded_step
+
+
+_patch_bf16_optimizer_overflow_guard()
+
+
 def maybe_zero_3(param, ignore_status=False, name=None):
     from deepspeed import zero
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
@@ -290,6 +341,13 @@ class LLaVATrainer(Trainer):
             lr_mapper = {}
             if self.args.mm_projector_lr is not None:
                 lr_mapper['mm_projector'] = self.args.mm_projector_lr
+                # The elastic connector is named elastic_projector/elastic_resampler
+                # (the base mm_projector is dropped), so the 'mm_projector' keyword
+                # never matches it. Route the elastic connector to the same LR the
+                # recipe intends for the projector, otherwise it falls back to the
+                # main (LLM-LoRA) learning rate instead of the lower connector LR.
+                lr_mapper['elastic_projector'] = self.args.mm_projector_lr
+                lr_mapper['elastic_resampler'] = self.args.mm_projector_lr
             if self.args.mm_vision_tower_lr is not None:
                 lr_mapper['vision_tower'] = self.args.mm_vision_tower_lr
             if len(lr_mapper) > 0:

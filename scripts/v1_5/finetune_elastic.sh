@@ -29,12 +29,12 @@
 deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --tok_levels 256 144 64 16 \
     --lora_ranks 8 16 32 64 \
-    --prefix_kl_weight 1.0 \
+    --prefix_kl_weight 0.1 \
     --coral_weight 0.1 \
-    --n_sample_students 1 \
+    --n_sample_students 0 \
     --lora_enable True \
     --lora_r 128 \
-    --lora_alpha 256 \
+    --lora_alpha 128 \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path liuhaotian/llava-v1.5-7b \
     --pretrain_elastic_path /var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain \
@@ -57,7 +57,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --gradient_accumulation_steps 32 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 500 \
+    --save_steps 100 \
     --save_total_limit 1 \
     --learning_rate 2e-5 \
     --weight_decay 0. \
@@ -65,7 +65,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 1024 \
+    --model_max_length 2048 \
     --gradient_checkpointing True \
     --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
     --dataloader_num_workers 4 \

@@ -38,6 +38,13 @@ class ElasticEngine:
         self.projector = NestedProjector(vision_dim, llm_dim, widths=None)
         self.last_tokens = None   # latest projected visual tokens (for coral)
         self._step = 0            # training-step counter for adapter logging
+        self._fwd_step = 0        # per-forward counter, bumped once at the top of
+                                  # each elastic training forward. Because DDP ranks
+                                  # run forwards in lockstep it is identical across
+                                  # ranks, and it stays fixed through a step's
+                                  # gradient-checkpointed backward recompute -- so it
+                                  # is a safe seed for any per-step random draw that
+                                  # must match across ranks and across recompute.
 
     # -- grid (1-D over token levels) -----------------------------------
     def grid(self):
@@ -65,7 +72,14 @@ class ElasticEngine:
             # teacher level, which must stay the full bank for prefix-KL/CORAL.
             if (self.cfg.use_nested_dropout and self.resampler.training
                     and l_tok != self.cfg.kl_teacher_tok_level):
-                n_tok = random.randint(1, n_tok)
+                # Seed the truncation deterministically so every DDP rank draws the
+                # SAME n_tok for this (step, level) -> identical forward/backward
+                # compute across ranks, eliminating the collective desync that
+                # deadlocked run_26187/26205/26209. Using a local RNG (not global
+                # random) also keeps the draw stable under gradient-checkpointed
+                # backward recompute and leaves the global RNG stream untouched.
+                _rng = random.Random(self._fwd_step * 1315423911 + l_tok)
+                n_tok = _rng.randint(1, n_tok)
             reduced = self.resampler(image_features, n_tok=n_tok)
         out = self.projector(reduced)
         self.last_tokens = out    # (N, n_k, llm_dim); grad kept for student level
