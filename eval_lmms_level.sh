@@ -26,10 +26,43 @@ LABEL=${TOK_LABELS[$LEVEL]}
 MODEL_TAG=$(basename "$MODEL_PATH")
 LOG_ROOT=/var/scratch/skalra/flexllava/eval_logs
 OUTDIR="${LOG_ROOT}/${MODEL_TAG}/${LABEL}"
-# mmbench_en_dev excluded: its gpt_eval_score requires OPENAI_API_KEY, which
-# isn't configured anywhere in this environment -- without it the judge call
-# fails and falls back to a meaningless placeholder score, not a real result.
-TASKS="mme,pope,scienceqa_img,textvqa_val,gqa"
+# mmbench_en_dev excluded. Its only real metric is gpt_eval_score, scored in
+# two stages (lmms_eval/tasks/mmbench/mmbench_evals.py):
+#   1. can_infer() heuristically maps the model's free-form answer onto one of
+#      the A/B/C/D options -- this needs no API key and handles clean answers.
+#   2. anything it cannot parse is sent to an OpenAI judge. With no key,
+#      get_chat_response() returns "Failed to obtain answer via API", the 3
+#      retries burn, and extract_answer_from_item() falls through to
+#      `rd.randint(...)` -- a RANDOM option.
+# So without a key MMBench is not "broken", it is silently *partly random*:
+# verbose or hedging answers get a coin flip. That biases smaller/chattier
+# backbones exactly where we care, so the number is not trustworthy.
+# Re-enable by adding mmbench_en_dev to TASKS once OPENAI_API_KEY is set.
+#
+# vqav2_val included to match AdaLLaVA's benchmark set (they use vqav2_test +
+# EvalAI submission; _val scores locally so we get a number immediately).
+# WARNING: VQAv2 val is ~214k questions -- on its own roughly 7x the other
+# five tasks combined. Set EVAL_LIMIT to subsample (see LIMIT_ARG below), or
+# override TASKS to drop vqav2_val for a quick turnaround, e.g.
+
+# TASKS="${TASKS:-mme,pope,scienceqa_img,textvqa_val,gqa,vqav2_val}"
+TASKS="${TASKS:-mme,pope,scienceqa_img,textvqa_val,gqa}"
+
+
+# Optional per-task sample cap, e.g. EVAL_LIMIT=2000 sbatch eval_lmms_level.sh ...
+# Applies to EVERY task, so a capped run is NOT comparable to published
+# numbers -- use it for iteration speed, not for reporting.
+LIMIT_ARG=""
+if [ -n "$EVAL_LIMIT" ]; then
+    LIMIT_ARG="--limit $EVAL_LIMIT"
+    echo "WARNING: --limit $EVAL_LIMIT is set; scores are on a subsample and"
+    echo "         are NOT comparable to published benchmark numbers."
+fi
+
+# Analytic efficiency metrics (FLOPs / prefill time / memory) are computed
+# alongside accuracy, using the same roofline cost model as AdaLLaVA.
+# See llava/eval/efficiency/NOTICE.md for what they do and don't capture.
+EFF_HARDWARE="${EFF_HARDWARE:-jetson_orin_nano_8gb}"
 
 module load cuda12.6/toolkit/12.6
 
@@ -87,15 +120,22 @@ echo "════════════════════════�
 echo "  Evaluating tok_level=${LEVEL}  (${LABEL})"
 echo "══════════════════════════════════════════════════"
 
+echo "Efficiency model: hardware=${EFF_HARDWARE} (analytic roofline)"
+echo "Tasks: $TASKS"
+
 accelerate launch --num_processes=1 \
     -m lmms_eval \
     --model       llava_elastic \
-    --model_args  "pretrained=${MODEL_PATH},tok_level=${LEVEL},device_map=cuda:0,conv_template=${CONV_TEMPLATE}" \
+    --model_args  "pretrained=${MODEL_PATH},tok_level=${LEVEL},device_map=cuda:0,conv_template=${CONV_TEMPLATE},eff_hardware=${EFF_HARDWARE}" \
     --tasks       "$TASKS" \
     --batch_size  $BATCH_SIZE \
+    $LIMIT_ARG \
     --log_samples \
     --log_samples_suffix "elastic_${LABEL}" \
     --output_path "$OUTDIR"
 
 echo ""
 echo "Done ${LABEL}: $(date)"
+echo ""
+echo "Combined accuracy + efficiency table (once all 4 array tasks finish):"
+echo "  python3 scripts/summarize_eval.py ${MODEL_TAG}"

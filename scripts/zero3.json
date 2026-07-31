@@ -13,6 +13,8 @@
     "train_micro_batch_size_per_gpu": "auto",
     "train_batch_size": "auto",
     "gradient_accumulation_steps": "auto",
+    "_comment_gradient_clipping": "See scripts/zero2.json -- must be present as the literal 'auto' or HF's max_grad_norm is silently discarded and DeepSpeed applies NO clipping.",
+    "gradient_clipping": "auto",
     "zero_optimization": {
         "stage": 3,
         "overlap_comm": true,

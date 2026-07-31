@@ -7,6 +7,19 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --output=./jobs/eval_lmms_%A.out
 
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ DEPRECATED / UNMAINTAINED -- use eval_lmms_level.sh instead.              │
+# │                                                                          │
+# │ This runs all 4 token levels serially inside ONE job; eval_lmms_level.sh  │
+# │ runs them as a 4-task SLURM array, i.e. 4 GPUs in parallel. It has never  │
+# │ been submitted (no jobs/eval_lmms_<jobid>.out has ever existed) and is    │
+# │ kept only as a fallback for when array jobs are inconvenient.            │
+# │                                                                          │
+# │ Because it duplicates TASKS / EFF_HARDWARE / conv-template detection, it  │
+# │ WILL drift from eval_lmms_level.sh -- it already has. Diff the two before │
+# │ trusting any number this produces.                                       │
+# └──────────────────────────────────────────────────────────────────────────┘
+#
 # FlexLLaVA evaluation via lmms-eval (same framework as AdaLLaVA).
 # Evaluates all 4 token levels on 6 benchmarks; datasets auto-download from HF.
 #
@@ -26,10 +39,15 @@ MODEL_PATH=${1:-/var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain
 # from whichever model ran most recently.
 export MODEL_TAG=$(basename "$MODEL_PATH")
 LOG_ROOT=/var/scratch/skalra/flexllava/eval_logs
-# mmbench_en_dev excluded: its gpt_eval_score requires OPENAI_API_KEY, which
-# isn't configured anywhere in this environment -- without it the judge call
-# fails and falls back to a meaningless placeholder score, not a real result.
-TASKS="mme,pope,scienceqa_img,textvqa_val,gqa"
+# mmbench_en_dev excluded -- see eval_lmms_level.sh for the full explanation
+# (without OPENAI_API_KEY, unparseable answers get a random option, so the
+# score is partly random rather than simply missing).
+#
+# vqav2_val matches AdaLLaVA's benchmark set. NOTE it is ~214k questions,
+# roughly 7x the other five combined; override TASKS or set EVAL_LIMIT to
+# trade completeness for turnaround.
+TASKS="${TASKS:-mme,pope,scienceqa_img,textvqa_val,gqa,vqav2_val}"
+EFF_HARDWARE="${EFF_HARDWARE:-jetson_orin_nano_8gb}"
 
 module load cuda12.6/toolkit/12.6
 
@@ -81,7 +99,7 @@ for LEVEL in 0 1 2 3; do
     accelerate launch --num_processes=1 \
         -m lmms_eval \
         --model       llava_elastic \
-        --model_args  "pretrained=${MODEL_PATH},tok_level=${LEVEL},device_map=cuda:0,conv_template=${CONV_TEMPLATE}" \
+        --model_args  "pretrained=${MODEL_PATH},tok_level=${LEVEL},device_map=cuda:0,conv_template=${CONV_TEMPLATE},eff_hardware=${EFF_HARDWARE}" \
         --tasks       "$TASKS" \
         --batch_size  1 \
         --log_samples \
@@ -117,11 +135,14 @@ def find_result(label, bench):
         return "N/A"
     data = json.load(open(files[-1]))
     results = data.get("results", {})
-    # Pull the first numeric metric value
+    # Pull the first numeric metric value. Skip ",efficiency" keys: the
+    # wrapper now folds FLOPs/time/memory into each task's result block, and
+    # those would otherwise be printed as if they were an accuracy score.
     for task_key, metrics in results.items():
         if bench.split("_")[0] in task_key.lower():
             for k, v in metrics.items():
-                if isinstance(v, (int, float)) and "stderr" not in k:
+                if isinstance(v, (int, float)) and "stderr" not in k \
+                        and not k.endswith(",efficiency"):
                     return f"{v:.1f}"
     return "N/A"
 

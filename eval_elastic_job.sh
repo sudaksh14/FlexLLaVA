@@ -8,6 +8,22 @@
 #SBATCH --output=./jobs/eval_%A.out
 #SBATCH --export=ALL
 
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ DEPRECATED / UNMAINTAINED -- use eval_lmms_level.sh instead.              │
+# │                                                                          │
+# │ This is the PRE-lmms-eval pipeline: it drives llava/eval/model_vqa_*.py   │
+# │ against manually-downloaded benchmark data under playground/data/eval/    │
+# │ and scrapes scores out of text files. It has never been submitted (no     │
+# │ jobs/eval_<jobid>.out has ever existed), and it cannot run as-is: only    │
+# │ playground/data/eval/answers/ exists -- the MME / pope / mmbench /        │
+# │ scienceqa / textvqa / gqa data dirs it expects were never downloaded.     │
+# │                                                                          │
+# │ The lmms-eval path supersedes it entirely: datasets auto-download from    │
+# │ HF, scoring is the official toolkit (same one AdaLLaVA uses), and it is   │
+# │ the only path that carries the elastic engine + efficiency metrics.       │
+# │ Kept for reference on the old per-benchmark answer-file layout only.      │
+# └──────────────────────────────────────────────────────────────────────────┘
+#
 # Evaluate FlexLLaVA elastic pretrain checkpoint at all 4 token levels.
 # Benchmarks: MME · POPE · MMBench · ScienceQA · TextVQA · GQA
 # Results are aggregated into a comparison table at the end.

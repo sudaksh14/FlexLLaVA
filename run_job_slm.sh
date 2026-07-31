@@ -1,6 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=finetune_FlexLLaVA_SLM
-#SBATCH -t 150:00:00
+# 200h, not 150h: one epoch of Stage 2 is 5197 steps at ~103s/it on 2x A10 =
+# ~149h, which run_26226 proved is too close to the old 150h limit -- it was
+# CANCELLED DUE TO TIME LIMIT at 149:58:38, having reached only 92%
+# (4778/5197). Both defq and fatq have an infinite partition limit, so the
+# 150h was self-imposed with no headroom. Checkpoints every 500 steps mean a
+# timeout is recoverable, but only if the checkpoint is healthy -- last time
+# it was not (see the diverged-checkpoint note in scripts/v1_5/finetune_elastic_slm.sh).
+#SBATCH -t 200:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=2
 #SBATCH --gres=gpu:A10:2

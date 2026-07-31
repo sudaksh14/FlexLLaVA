@@ -10,7 +10,31 @@
 # elastic_projector, and LoRA weights are warm-started.
 #
 # In Stage 2 the LLM is UNFROZEN (freeze_backbone not set) alongside the
-# elastic modules.  ZeRO-3 is required to shard the full LLM gradients.
+# elastic modules.
+#
+# ── 2026-07-31: full finetune, and why the hyperparameters changed ──────────
+# The previous settings (LR 2e-4, lora_enable True, lora_alpha 256 / r 128 ->
+# LoRA scale 2.0) diverged: run_26226 trained cleanly to loss ~1.14 then blew
+# up (16 -> 456 -> ... -> 21589) about a quarter of an epoch in, and because
+# save_total_limit=1 kept only post-divergence checkpoints, every later run
+# that resumed inherited the wreckage (run_26233 started at loss ~28000).
+#
+# Compare the 7B script (scripts/v1_5/finetune_elastic.sh): LR 2e-5, alpha
+# 128 / r 128 -> scale 1.0. That is a ~20x smaller effective update, on a 6x
+# LARGER model. The 7B run was never "more stable because it is bigger" -- it
+# was simply configured far more conservatively. Nothing was clipping either
+# run: scripts/zero{2,3}.json were missing the "gradient_clipping" key, so
+# max_grad_norm never reached DeepSpeed (now fixed).
+#
+# Now: full finetune (--lora_enable False) at LR 2e-5. At 1.1B params LoRA
+# buys little, it removes the alpha/r scale as a failure mode, and it matches
+# the protocol of AdaLLaVA, LLaVA-1.5 stage 2, TinyLLaVA and MobileVLM.
+# --lora_r / --lora_alpha below are inert while --lora_enable is False; they
+# are left at the 7B-matching scale 1.0 in case LoRA is switched back on.
+#
+# NOTE: --lora_enable controls PEFT LoRA on the *LLM* only. The rank-nested
+# LoRA on the vision tower -- the actual elastic mechanism -- is controlled by
+# --vision_lora_enable (default True) and stays ON.
 
 LLM_KEY=${1:-"qwen0.5b"}
 
@@ -68,9 +92,9 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 0.1 \
     --coral_weight 0.1 \
-    --lora_enable True \
+    --lora_enable False \
     --lora_r 128 \
-    --lora_alpha 256 \
+    --lora_alpha 128 \
     --mm_projector_lr 2e-5 \
     --mm_vision_tower_lr 2e-5 \
     --deepspeed ./scripts/zero2.json \
@@ -97,7 +121,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --save_strategy "steps" \
     --save_steps 500 \
     --save_total_limit 1 \
-    --learning_rate 2e-4 \
+    --learning_rate 2e-5 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \

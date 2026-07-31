@@ -595,6 +595,22 @@ def evaluate(
         if log_samples:
             results_dict["samples"] = dict(samples)
 
+        # FlexLLaVA: fold in analytic efficiency metrics (FLOPs / prefill time
+        # / memory) when the model exposes them, so a single results JSON
+        # carries both accuracy and cost. Models that don't implement
+        # efficiency_summary() are unaffected.
+        if hasattr(lm, "efficiency_summary"):
+            try:
+                eff = lm.efficiency_summary()
+                if eff:
+                    results_dict["efficiency"] = eff
+                    for task_name, metrics in eff.items():
+                        if task_name in results_dict["results"]:
+                            results_dict["results"][task_name].update(
+                                {f"{k},efficiency": v for k, v in metrics.items()})
+            except Exception as e:
+                eval_logger.warning(f"efficiency summary unavailable: {e}")
+
         return results_dict
 
     else:

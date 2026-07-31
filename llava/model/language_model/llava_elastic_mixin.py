@@ -293,6 +293,13 @@ class LlavaElasticMixin:
                     if (cfg.use_coral_align and teacher_tokens is not None
                             and cur_tokens is not None):
                         coral = _el.coral_loss(cur_tokens, teacher_tokens)
+                        # CORAL was the one term with no health check, and it is
+                        # the one that can silently dominate: it compares
+                        # covariances, so it grows as the 4th power of the
+                        # projected-token scale. Check the tokens themselves
+                        # too -- a large activation scale is the upstream cause.
+                        self._health_check(f"coral_{tag}", coral)
+                        self._health_check(f"proj_tokens_{tag}", cur_tokens)
                         coral_weighted = cfg.coral_weight * coral / n_active
                         coral_total += coral_weighted.item()
                         per_level[f"loss/coral_{tag}"] = coral.item()

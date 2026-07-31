@@ -419,6 +419,47 @@ class LLaVATrainer(Trainer):
 
         return self.optimizer
 
+    @staticmethod
+    def _elastic_owner(model):
+        """Find the module the elastic forward actually ran as.
+
+        attach_elastic_engine() deliberately attaches `elastic_engine` (and the
+        forward then sets `_loss_components`) on the *underlying*
+        LlavaXxxForCausalLM, not on any wrapper -- see its docstring. By the
+        time compute_loss() sees the model it may be wrapped as
+        DeepSpeedEngine(PeftModel(LoraModel(LlavaLlamaForCausalLM))).
+
+        Why this exists: elastic loss components were logged in the pre-LoRA
+        runs of 2026-07-17 and silently vanished from 2026-07-22 onwards, the
+        moment --lora_enable True was introduced (verified in the wandb
+        binaries: `grad_norm` logged 2092 times in run_26233, `loss/ce` zero
+        times). That cost us the per-term breakdown for the whole TinyLlama
+        divergence, which is exactly when it was needed.
+
+        The correlation is solid; the mechanism is NOT. A plain getattr()
+        demonstrably *does* forward through a real peft.get_peft_model wrapper
+        (see jobs/verify_component_logging.sh), so the obvious explanation is
+        wrong and the true cause remains unidentified. This is therefore a
+        belt-and-braces fallback, only consulted when getattr returns None:
+        walk the wrapper chain explicitly and match on __dict__, so no
+        __getattr__ forwarding is involved either way. Verified against bare /
+        DeepSpeed / PEFT / DeepSpeed+PEFT / real-PEFT, plus a no-engine
+        negative case and a self-referential wrapper.
+        """
+        seen, stack = set(), [model]
+        while stack:
+            obj = stack.pop()
+            if id(obj) in seen:
+                continue
+            seen.add(id(obj))
+            if "elastic_engine" in vars(obj):
+                return obj
+            for attr in ("module", "base_model", "model"):
+                nxt = getattr(obj, attr, None)
+                if isinstance(nxt, torch.nn.Module):
+                    stack.append(nxt)
+        return None
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         loss, outputs = super().compute_loss(model, inputs, return_outputs=True, **kwargs)
 
@@ -444,10 +485,34 @@ class LLaVATrainer(Trainer):
 
         # Log elastic component losses + perplexity if the forward populated them.
         components = getattr(model, "_loss_components", None)
+        if components is None:
+            # getattr failed to reach through the DeepSpeed/PEFT wrappers --
+            # resolve the real owner once and cache it.
+            if not hasattr(self, "_elastic_owner_cache"):
+                self._elastic_owner_cache = self._elastic_owner(model)
+            owner = self._elastic_owner_cache
+            if owner is not None:
+                components = vars(owner).get("_loss_components")
+        # compute_loss() runs once per *micro*-batch, so logging here
+        # unthrottled emits gradient_accumulation_steps (32) entries per
+        # optimizer step -- 32x the intended rate, which is how run_25726.out
+        # reached 117MB. Emit at most one entry per global_step so the elastic
+        # components land at the same cadence as HF's own loss logging.
+        if components is not None:
+            step = self.state.global_step
+            if getattr(self, "_last_component_log_step", -1) == step:
+                components = None
+            else:
+                self._last_component_log_step = step
         if components is not None:
             log_dict = dict(components)
             log_dict["loss/total"] = loss.item()
-            log_dict["perplexity"] = float(torch.exp(torch.tensor(components["loss/ce"])))
+            ce = components.get("loss/ce")
+            if ce is not None:
+                # Perplexity is only meaningful for the CE term. Clamp before
+                # exp(): a diverging run makes exp(ce) overflow to inf, which
+                # then poisons the wandb panel for the whole run.
+                log_dict["perplexity"] = float(torch.exp(torch.tensor(min(ce, 20.0))))
             self.log(log_dict)
 
         return (loss, outputs) if return_outputs else loss

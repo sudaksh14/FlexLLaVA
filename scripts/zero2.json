@@ -13,6 +13,8 @@
     "train_micro_batch_size_per_gpu": "auto",
     "train_batch_size": "auto",
     "gradient_accumulation_steps": "auto",
+    "_comment_gradient_clipping": "MUST be present and set to 'auto'. HF's fill_match() only substitutes max_grad_norm into a key that already exists with the literal value 'auto'; if the key is absent it returns silently, DeepSpeed falls back to its own default of 0.0 = NO CLIPPING, and HF's max_grad_norm is discarded with no warning. That is what let the TinyLlama Stage-2 run diverge (grad norms 17k-77k).",
+    "gradient_clipping": "auto",
     "zero_optimization": {
         "stage": 2,
         "overlap_comm": false,

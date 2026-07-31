@@ -21,12 +21,14 @@ tok_level values (must match training config tok_levels=[256,144,64,16]):
   3 →  16 tokens  (most compressed)
 """
 
+import contextlib
 import json
 import logging
 import os
 from typing import List, Optional, Union
 
 import torch
+from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 
 from lmms_eval.models.llava import Llava
@@ -36,6 +38,7 @@ eval_logger = logging.getLogger("lmms-eval")
 try:
     from llava.model.builder import load_pretrained_model
     from llava.mm_utils import get_model_name_from_path
+    from llava.constants import IMAGE_TOKEN_INDEX
 except ImportError:
     eval_logger.error("LLaVA is not installed.")
 
@@ -46,7 +49,9 @@ def _attach_elastic(model, ckpt_dir: str):
     if not os.path.exists(cfg_path):
         raise FileNotFoundError(
             f"elastic_config.json not found at {cfg_path}. "
-            "Re-run training or write it manually (see eval_elastic_job.sh)."
+            "train.py writes it at the end of every elastic run; if this is an "
+            "older checkpoint, copy the file from a newer run with the same "
+            "tok_levels/lora_ranks."
         )
 
     import dataclasses
@@ -100,6 +105,7 @@ class LlavaElastic(Llava):
         self,
         pretrained: str,
         tok_level: int = 0,
+        eff_hardware: str = "jetson_orin_nano_8gb",
         # inherited args — keep defaults matching Llava
         truncation: Optional[bool] = True,
         device: Optional[str] = "cuda",
@@ -172,6 +178,25 @@ class LlavaElastic(Llava):
         n_tok = elastic_cfg.tok_levels[self.tok_level]
         eval_logger.info(f"[elastic] tok_level={self.tok_level} → {n_tok} visual tokens")
 
+        # ---- analytic efficiency model -------------------------------------
+        # n_visual_tokens is what our elasticity axis actually changes, and it
+        # lands directly in the LLM's prompt length, so the cost model needs it
+        # to convert an input_ids length into a real sequence length.
+        self.n_visual_tokens = int(n_tok)
+        self._eff_records = {}   # task_name -> list of per-sample metric dicts
+        self._analyzer = None
+        try:
+            from llava.eval.efficiency import ElasticAnalyzer
+            self._analyzer = ElasticAnalyzer(self._model.config, eff_hardware)
+            self.eff_hardware = eff_hardware
+            eval_logger.info(
+                f"[elastic] efficiency model on {eff_hardware}: analytic roofline, "
+                f"LLM only (frozen vision tower is a constant offset across levels)")
+        except Exception as e:
+            # Efficiency metrics are strictly additive -- never let them break
+            # an accuracy run.
+            eval_logger.warning(f"[elastic] efficiency model disabled: {e}")
+
         self._config = self._model.config
         self.model.eval()
         self.model.tie_weights()
@@ -202,3 +227,132 @@ class LlavaElastic(Llava):
         else:
             self._rank = 0
             self._world_size = 1
+
+    # ------------------------------------------------------------------
+    # Analytic efficiency instrumentation
+    # ------------------------------------------------------------------
+    def _seq_lengths(self, input_ids, attention_mask):
+        """True post-expansion LLM sequence length for each row of a batch.
+
+        input_ids still carries IMAGE_TOKEN_INDEX as a *single* placeholder
+        per image; prepare_inputs_labels_for_multimodal later expands each one
+        into n_visual_tokens embeddings. The cost model needs the expanded
+        length, since that -- not the tokenizer output -- is what the LLM
+        actually attends over, and it is precisely what our elasticity axis
+        changes.
+        """
+        lengths = []
+        for i in range(input_ids.shape[0]):
+            row = input_ids[i]
+            if attention_mask is not None:
+                true_len = int(attention_mask[i].sum().item())
+                row = row[attention_mask[i].bool()]
+            else:
+                true_len = int(row.numel())
+            n_img = int((row == IMAGE_TOKEN_INDEX).sum().item())
+            lengths.append(true_len - n_img + n_img * self.n_visual_tokens)
+        return lengths
+
+    @contextlib.contextmanager
+    def _record_generate(self, sink):
+        """Temporarily wrap model.generate to log (prompt_len, gen_len).
+
+        Patch the object the parent actually calls: `self.model` unwraps
+        through accelerate, so it is not necessarily `self._model`. Patching
+        the wrong one silently records nothing.
+        """
+        target = self.model
+        original = target.generate
+
+        def wrapped(*args, **kwargs):
+            out = original(*args, **kwargs)
+            try:
+                input_ids = args[0] if args else kwargs.get("input_ids")
+                attn = kwargs.get("attention_mask")
+                pad_id = kwargs.get("pad_token_id")
+                prompt_lens = self._seq_lengths(input_ids, attn)
+                cont = out
+                for i, plen in enumerate(prompt_lens):
+                    if isinstance(cont, torch.Tensor) and i < cont.shape[0]:
+                        row = cont[i]
+                        gen_len = int((row != pad_id).sum().item()) if pad_id is not None else int(row.numel())
+                    else:
+                        gen_len = 1
+                    sink.append((plen, max(gen_len, 1)))
+            except Exception as e:  # never break generation for a metric
+                eval_logger.warning(f"[elastic] efficiency capture skipped: {e}")
+            return out
+
+        target.generate = wrapped
+        try:
+            yield
+        finally:
+            target.generate = original
+
+    def _cost(self, prompt_len, gen_len):
+        """Memoised roofline cost. The analyzer walks every layer for every
+        decode step, so re-running it per sample would cost more CPU than the
+        eval itself; (prompt_len, gen_len) fully determines the result."""
+        key = (prompt_len, gen_len)
+        cache = getattr(self, "_cost_cache", None)
+        if cache is None:
+            cache = self._cost_cache = {}
+        if key not in cache:
+            cache[key] = self._analyzer.analyze_generate_task(
+                prompt_len=prompt_len, gen_len=gen_len, batchsize=1,
+                w_bit=16, a_bit=16, kv_bit=16, use_flashattention=False)
+        return cache[key]
+
+    def generate_until(self, requests: List[Instance]) -> List[str]:
+        if self._analyzer is None:
+            return super().generate_until(requests)
+
+        # Group by task so each parent call covers exactly one task, which is
+        # what lets us attribute per-sample cost to the right benchmark. The
+        # parent returns results positionally, so re-scattering to the
+        # original indices keeps the contract identical to an ungrouped call.
+        groups = {}
+        for pos, req in enumerate(requests):
+            groups.setdefault(req.args[4], []).append((pos, req))
+
+        out: List[Optional[str]] = [None] * len(requests)
+        for task_name, items in groups.items():
+            captured = []
+            with self._record_generate(captured):
+                sub_res = super().generate_until([r for _, r in items])
+            for (pos, _), text in zip(items, sub_res):
+                out[pos] = text
+            records = self._eff_records.setdefault(task_name, [])
+            for prompt_len, gen_len in captured:
+                cost = self._cost(prompt_len, gen_len)
+                records.append({
+                    "prompt_len": prompt_len,
+                    "gen_len": gen_len,
+                    **{k: cost[k] for k in (
+                        "flops", "avg_flops", "prefill_flops", "prefill_time",
+                        "total_time", "memory_consumption",
+                        "prefill_memory_consumption")},
+                })
+        return out
+
+    def efficiency_summary(self):
+        """Mean efficiency metrics per task, plus deployment feasibility."""
+        from llava.eval.efficiency import EFFICIENCY_METRICS
+
+        summary = {}
+        for task_name, records in self._eff_records.items():
+            if not records:
+                continue
+            agg = {m: sum(r[m] for r in records) / len(records)
+                   for m in EFFICIENCY_METRICS if m in records[0]}
+            agg["total_time"] = sum(r["total_time"] for r in records) / len(records)
+            agg["mean_prompt_len"] = sum(r["prompt_len"] for r in records) / len(records)
+            agg["samples"] = len(records)
+            # Peak, not mean, is what decides whether the board OOMs.
+            peak_mem = max(r["memory_consumption"] for r in records)
+            agg["peak_memory_consumption"] = peak_mem
+            agg["fits_on_target"] = self._analyzer.fits_in_memory(peak_mem)
+            agg["n_visual_tokens"] = self.n_visual_tokens
+            agg["hardware"] = self.eff_hardware
+            summary[task_name] = agg
+        return summary
