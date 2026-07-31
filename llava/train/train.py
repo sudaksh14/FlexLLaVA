@@ -148,37 +148,19 @@ def maybe_zero_3(param, ignore_status=False, name=None):
     return param
 
 
-# Borrowed from peft.utils.get_peft_model_state_dict
-def get_peft_state_maybe_zero_3(named_params, bias):
-    if bias == "none":
-        to_return = {k: t for k, t in named_params if "lora_" in k}
-    elif bias == "all":
-        to_return = {k: t for k, t in named_params if "lora_" in k or "bias" in k}
-    elif bias == "lora_only":
-        to_return = {}
-        maybe_lora_bias = {}
-        lora_bias_names = set()
-        for k, t in named_params:
-            if "lora_" in k:
-                to_return[k] = t
-                bias_name = k.split("lora_")[0] + "bias"
-                lora_bias_names.add(bias_name)
-            elif "bias" in k:
-                maybe_lora_bias[k] = t
-        for k, t in maybe_lora_bias:
-            if bias_name in lora_bias_names:
-                to_return[bias_name] = t
-    else:
-        raise NotImplementedError
-    to_return = {k: maybe_zero_3(v, ignore_status=True) for k, v in to_return.items()}
-    return to_return
+def get_full_state_dict_maybe_zero_3(named_params):
+    """Full model state dict (frozen + trained), ZeRO-gathered.
 
-
-def get_peft_state_non_lora_maybe_zero_3(named_params, require_grad_only=True):
-    to_return = {k: t for k, t in named_params if "lora_" not in k}
-    if require_grad_only:
-        to_return = {k: t for k, t in to_return.items() if t.requires_grad}
-    to_return = {k: maybe_zero_3(v, ignore_status=True).cpu() for k, v in to_return.items()}
+    A LoRA-enabled elastic finetune has two kinds of "lora_" parameters:
+    PEFT-registered ones on the LLM (from get_peft_model), and plain
+    nn.Parameters the elastic engine's NestedLoRALinear injects directly onto
+    the vision tower (llava/model/elastic/nested_lora.py), outside of PEFT's
+    adapter registry. PEFT's own state-dict filtering (used by
+    ``model.save_pretrained`` on a PeftModel) only keeps the former, so a
+    PEFT adapter-only save silently drops the vision-tower nested-LoRA
+    weights. Saving the full state dict here avoids that split entirely.
+    """
+    to_return = {k: maybe_zero_3(v, ignore_status=True) for k, v in named_params}
     return to_return
 
 
@@ -1239,16 +1221,28 @@ def train(attn_implementation=None):
     model.config.use_cache = True
 
     if training_args.lora_enable:
-        state_dict = get_peft_state_maybe_zero_3(
-            model.named_parameters(), training_args.lora_bias
-        )
-        non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
-            model.named_parameters()
-        )
+        # Full state dict (frozen backbone + every trained param, including the
+        # vision-tower NestedLoRALinear's lora_A/lora_B -- see
+        # get_full_state_dict_maybe_zero_3). This is a self-contained
+        # checkpoint, matching what load_pretrained_model + attach_elastic_engine
+        # expect on the eval side (same format the non-LoRA/pretrain stage
+        # already saves). Deliberately NOT saved as a PEFT adapter
+        # (model.save_pretrained + adapter_config.json): transformers'
+        # from_pretrained auto-detects adapter_config.json and loads the base
+        # model from its base_model_name_or_path (the raw HF Hub checkpoint,
+        # no vision tower at all) instead of this directory, silently
+        # discarding everything trained in this run.
+        full_state_dict = get_full_state_dict_maybe_zero_3(model.named_parameters())
+        prefix = "base_model.model."
+        full_state_dict = {
+            (k[len(prefix):] if k.startswith(prefix) else k): v
+            for k, v in full_state_dict.items()
+        }
+
         if training_args.local_rank == 0 or training_args.local_rank == -1:
             model.config.save_pretrained(training_args.output_dir)
-            model.save_pretrained(training_args.output_dir, state_dict=state_dict)
-            torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
+            torch.save(full_state_dict, os.path.join(training_args.output_dir, 'pytorch_model.bin'))
+            tokenizer.save_pretrained(training_args.output_dir)
     else:
         safe_save_model_for_hf_trainer(trainer=trainer,
                                        output_dir=training_args.output_dir)
