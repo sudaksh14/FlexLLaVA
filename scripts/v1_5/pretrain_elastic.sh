@@ -20,11 +20,21 @@
 # trainable; ZeRO-2 avoids the ZeRO-3 communication overhead when the
 # frozen LLM parameters don't need gradient sharding.
 
+# Optional run tag, e.g.  ELASTIC_RUN_TAG=outnorm sbatch run_job_pretrain.sh
+# Suffixes the checkpoint/log dirs so a variant run does not overwrite the
+# untagged baseline. Stage 2 reads the same variable to find its warm-start.
+TAG="${ELASTIC_RUN_TAG:+-${ELASTIC_RUN_TAG}}"
+CKPT_ROOT=/var/scratch/skalra/flexllava/checkpoints
+LOG_ROOT=/var/scratch/skalra/flexllava/logs
+
+echo "[FlexLLaVA] Stage 1 output → ${CKPT_ROOT}/llava-elastic-pretrain${TAG}"
+
 deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --tok_levels 256 144 64 16 \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 1.0 \
     --coral_weight 0.01 \
+    --projector_out_norm True \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path lmsys/vicuna-7b-v1.5 \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \
@@ -39,7 +49,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --image_aspect_ratio square \
     --freeze_backbone True \
     --bf16 True \
-    --output_dir /var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain \
+    --output_dir "${CKPT_ROOT}/llava-elastic-pretrain${TAG}" \
     --num_train_epochs 1 \
     --per_device_train_batch_size 32 \
     --per_device_eval_batch_size 4 \
@@ -59,5 +69,5 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \
     --report_to wandb \
-    --run_name "elastic-pretrain-tok256-144-64-16" \
-    --logging_dir /var/scratch/skalra/flexllava/logs/elastic-pretrain
+    --run_name "elastic-pretrain-tok256-144-64-16${TAG}" \
+    --logging_dir "${LOG_ROOT}/elastic-pretrain${TAG}"

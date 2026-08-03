@@ -140,6 +140,14 @@ def _parse_elastic_args():
     p.add_argument("--use_coral", type=lambda x: x.lower() not in ("false", "0", "no"),
                    default=True, metavar="BOOL",
                    help="Enable CORAL alignment loss (default True; pass False to disable).")
+    p.add_argument("--projector_out_norm", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=False, metavar="BOOL",
+                   help="Add a LayerNorm on the projector output, with its gain "
+                        "calibrated to the LLM's token-embedding std at attach time "
+                        "(default False). Without it the projector emits tokens ~36x "
+                        "larger than the embeddings, which is survivable while the "
+                        "backbone is frozen but is a divergence risk in a Stage-2 "
+                        "full finetune.")
     p.add_argument("--n_sample_students", type=int, default=0, metavar="INT",
                    help="Students sampled per step (0=full grid, 1=Option A, etc.).")
     p.add_argument("--vision_lora_enable", type=lambda x: x.lower() not in ("false", "0", "no"),
@@ -186,6 +194,7 @@ def main():
         use_prefix_kl=elastic_args.use_kd,     prefix_kl_weight=elastic_args.prefix_kl_weight,
         use_coral_align=elastic_args.use_coral, coral_weight=elastic_args.coral_weight,
         use_nested_dropout=True,
+        projector_out_norm=elastic_args.projector_out_norm,
         kl_teacher_tok_level=0,                 # largest tok level is teacher
         n_sample_students=elastic_args.n_sample_students,
         log_adapter_every=50,

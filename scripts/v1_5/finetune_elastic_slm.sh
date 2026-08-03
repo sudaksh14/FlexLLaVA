@@ -78,10 +78,14 @@ case "$LLM_KEY" in
     ;;
 esac
 
-PRETRAIN_CKPT="/var/scratch/skalra/flexllava/checkpoints/elastic-pretrain-${LLM_KEY}"
-OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-${LLM_KEY}"
-LOG_DIR="/var/scratch/skalra/flexllava/logs/elastic-finetune-${LLM_KEY}"
-RUN_NAME="elastic-finetune-${LLM_KEY}-tok256-144-64-16"
+# Optional run tag -- must match the ELASTIC_RUN_TAG used for Stage 1, since it
+# selects both the warm-start checkpoint and this run's output dir.
+TAG="${ELASTIC_RUN_TAG:+-${ELASTIC_RUN_TAG}}"
+
+PRETRAIN_CKPT="/var/scratch/skalra/flexllava/checkpoints/elastic-pretrain-${LLM_KEY}${TAG}"
+OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-${LLM_KEY}${TAG}"
+LOG_DIR="/var/scratch/skalra/flexllava/logs/elastic-finetune-${LLM_KEY}${TAG}"
+RUN_NAME="elastic-finetune-${LLM_KEY}-tok256-144-64-16${TAG}"
 
 echo "[FlexLLaVA] Finetune  LLM=${MODEL_PATH}  conv=${CONV_VERSION}"
 echo "[FlexLLaVA] Pretrain checkpoint → ${PRETRAIN_CKPT}"
@@ -92,6 +96,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 0.1 \
     --coral_weight 0.1 \
+    --projector_out_norm True \
     --lora_enable False \
     --lora_r 128 \
     --lora_alpha 128 \

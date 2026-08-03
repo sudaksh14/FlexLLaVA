@@ -49,6 +49,16 @@ class ElasticConfig:
     lora_alpha: float = 1.0
     lora_dropout: float = 0.0
 
+    # ---- projector output scale ----------------------------------------
+    # The projector's fc2 output is unconstrained; measured std ~0.54 against an
+    # LLM token-embedding std of ~0.015 (36x). With a frozen backbone that only
+    # skews the visual positions; with the backbone UNFROZEN (Stage-2 full
+    # finetune) it is a live divergence risk -- run 26531 blew up at epoch 0.46
+    # with gradient clipping correctly enabled. Enabling this adds a LayerNorm on
+    # the projector output whose gain is calibrated to the embedding std at
+    # attach time. Default False so existing checkpoints load unchanged.
+    projector_out_norm: bool = False
+
     # ---- loss configuration (nested_query method) ----------------------
     use_pos_embed: bool = False          # learned patch+query positional encodings in resampler
     use_prefix_kl: bool = True           # coarse-to-fine self-distillation

@@ -35,7 +35,8 @@ class ElasticEngine:
                                                   num_patches=num_patches,
                                                   use_pos_embed=cfg.use_pos_embed)
         # Projector stays full-width (no nesting): width is not an elasticity axis.
-        self.projector = NestedProjector(vision_dim, llm_dim, widths=None)
+        self.projector = NestedProjector(vision_dim, llm_dim, widths=None,
+                                         out_norm=getattr(cfg, "projector_out_norm", False))
         self.last_tokens = None   # latest projected visual tokens (for coral)
         self._step = 0            # training-step counter for adapter logging
         self._fwd_step = 0        # per-forward counter, bumped once at the top of
@@ -187,6 +188,21 @@ def attach_elastic_engine(model, cfg):
                 w.set_level(lvl)
         vt.set_level = _set_level
     engine = ElasticEngine(cfg, vt, vt.hidden_size, underlying.config.hidden_size)
+    if getattr(cfg, "projector_out_norm", False):
+        emb = underlying.get_input_embeddings().weight
+        # Under ZeRO-3 the parameter can be sharded to a 0-element placeholder at
+        # attach time; calibrating off that would give a meaningless target.
+        if emb.numel() == 0:
+            print("[elastic] projector_out_norm: input embeddings not materialized "
+                  "(ZeRO-3 shard?), leaving LayerNorm gain at its 1.0 init")
+        else:
+            target = emb.detach().float().std().item()
+            if engine.projector.calibrate_out_norm(target):
+                print(f"[elastic] projector_out_norm: gain calibrated to embedding "
+                      f"std {target:.5f}")
+            else:
+                print("[elastic] projector_out_norm: gain already trained, "
+                      "leaving checkpoint values intact")
     if engine.resampler is not None:
         underlying.add_module("elastic_resampler", engine.resampler)
     underlying.add_module("elastic_projector", engine.projector)

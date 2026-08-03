@@ -411,9 +411,16 @@ def make_table(result_dict, column: str = "results"):
 
             points = "N/A"
             if v is not None:
-                if 0 <= v <= 1:
-                    v *= 100
-                points = "%.4f" % v
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    # Non-numeric metrics (e.g. our 'hardware,efficiency' tag,
+                    # 'fits_on_target') are printed verbatim -- comparing them
+                    # against 0/1 below raises TypeError and kills the job
+                    # *after* results.json has already been written.
+                    points = str(v)
+                else:
+                    if 0 <= v <= 1:
+                        v *= 100
+                    points = "%.4f" % v
 
             if m + "_stderr" + "," + f in dic:
                 if v is None:

@@ -133,7 +133,8 @@ class NestedProjector(nn.Module):
     break the hierarchical subspace property.
     """
 
-    def __init__(self, vision_dim, llm_dim, widths=None, hidden_mult=1):
+    def __init__(self, vision_dim, llm_dim, widths=None, hidden_mult=1,
+                 out_norm=False):
         super().__init__()
         self.llm_dim = llm_dim
         self.widths = widths
@@ -142,11 +143,50 @@ class NestedProjector(nn.Module):
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden, llm_dim)
         self.level = (len(widths) - 1) if widths else 0
+        # Optional output normalization. fc2 is unconstrained, so its output std
+        # is whatever pretraining happened to land on (~0.54 measured), while the
+        # LLM's own token embeddings sit at ~0.015. Feeding a 36x-larger signal
+        # into the residual stream is survivable with a frozen backbone (Stage 1)
+        # but destabilizes a full finetune (Stage 2). See calibrate_out_norm.
+        self.out_norm = nn.LayerNorm(llm_dim) if out_norm else None
 
     def set_level(self, level: int) -> None:
         if self.widths is not None:
             assert 0 <= level < len(self.widths)
             self.level = level
+
+    @torch.no_grad()
+    def calibrate_out_norm(self, target_std: float) -> bool:
+        """Set the output LayerNorm gain so projected tokens enter the LLM at the
+        same scale as its own token embeddings.
+
+        LayerNorm's default gain of 1.0 would produce unit-std tokens -- ~67x
+        LARGER than the embeddings, i.e. worse than no norm at all -- so the gain
+        MUST be calibrated. It stays learnable and can grow if the model wants it.
+
+        No-op (returns False) if the gain has already moved away from its 1.0
+        init, which means trained values were loaded from a checkpoint and must
+        not be clobbered.
+        """
+        if self.out_norm is None:
+            return False
+        w = self.out_norm.weight
+        if not torch.allclose(w, torch.ones_like(w)):
+            return False
+        w.fill_(target_std)
+        self.out_norm.bias.zero_()
+        return True
+
+    def _apply_out_norm(self, x: torch.Tensor, w: int) -> torch.Tensor:
+        """Normalize over the ACTIVE width only. Normalizing over the full
+        llm_dim would mix the zero-padded tail into the statistics and destroy
+        the nested-subspace property."""
+        if self.out_norm is None:
+            return x
+        if w == self.llm_dim:
+            return self.out_norm(x)
+        return F.layer_norm(x, (w,), self.out_norm.weight[:w],
+                            self.out_norm.bias[:w], self.out_norm.eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.act(self.fc1(x))
@@ -156,13 +196,13 @@ class NestedProjector(nn.Module):
                 # Matryoshka linear: use the first w rows of fc2's weight matrix.
                 # Gradient is confined to fc2.weight[:w, :] — proper nested training.
                 bias = self.fc2.bias[:w] if self.fc2.bias is not None else None
-                out_w = F.linear(x, self.fc2.weight[:w, :], bias)
+                out_w = self._apply_out_norm(F.linear(x, self.fc2.weight[:w, :], bias), w)
                 # Zero-pad inactive dimensions so LLM input dim stays fixed.
                 pad = torch.zeros(*x.shape[:-1], self.llm_dim - w,
                                   dtype=x.dtype, device=x.device)
                 x = torch.cat([out_w, pad], dim=-1)
             else:
-                x = self.fc2(x)
+                x = self._apply_out_norm(self.fc2(x), self.llm_dim)
         else:
-            x = self.fc2(x)
+            x = self._apply_out_norm(self.fc2(x), self.llm_dim)
         return x

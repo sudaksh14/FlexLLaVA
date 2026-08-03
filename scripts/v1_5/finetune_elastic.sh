@@ -26,18 +26,28 @@
 # LLM LoRA (rank 128): only ~416M LoRA params need optimizer states instead of 7B,
 # reducing GPU memory from ~43 GB to ~16 GB per GPU — fits on A40 with ZeRO-2.
 
+# Optional run tag -- must match the ELASTIC_RUN_TAG used for Stage 1, since it
+# selects both the warm-start checkpoint and this run's output dir.
+TAG="${ELASTIC_RUN_TAG:+-${ELASTIC_RUN_TAG}}"
+CKPT_ROOT=/var/scratch/skalra/flexllava/checkpoints
+LOG_ROOT=/var/scratch/skalra/flexllava/logs
+
+echo "[FlexLLaVA] Warm-start from → ${CKPT_ROOT}/llava-elastic-pretrain${TAG}"
+echo "[FlexLLaVA] Stage 2 output  → ${CKPT_ROOT}/llava-elastic-finetune${TAG}"
+
 deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --tok_levels 256 144 64 16 \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 0.1 \
     --coral_weight 0.1 \
+    --projector_out_norm True \
     --n_sample_students 0 \
     --lora_enable True \
     --lora_r 128 \
     --lora_alpha 128 \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path liuhaotian/llava-v1.5-7b \
-    --pretrain_elastic_path /var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain \
+    --pretrain_elastic_path "${CKPT_ROOT}/llava-elastic-pretrain${TAG}" \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \
     --version v1 \
     --data_path /var/scratch/skalra/flexllava/data/LLaVA-Finetune/llava_v1_5_mix665k.json \
@@ -50,7 +60,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --output_dir /var/scratch/skalra/flexllava/checkpoints/llava-elastic-finetune \
+    --output_dir "${CKPT_ROOT}/llava-elastic-finetune${TAG}" \
     --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 1 \
@@ -71,5 +81,5 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to wandb \
-    --run_name "elastic-finetune-tok256-144-64-16" \
-    --logging_dir /var/scratch/skalra/flexllava/logs/elastic-finetune
+    --run_name "elastic-finetune-tok256-144-64-16${TAG}" \
+    --logging_dir "${LOG_ROOT}/elastic-finetune${TAG}"

@@ -15,6 +15,50 @@ from llava.model.elastic import losses
 from llava.model.elastic.flops import grid_cost
 
 
+def test_projector_out_norm_off_by_default():
+    proj = NestedProjector(16, 32)
+    assert proj.out_norm is None
+    assert not any(k.startswith("out_norm") for k in proj.state_dict())
+    # calibration is a no-op, so old checkpoints keep their exact behaviour
+    assert proj.calibrate_out_norm(0.015) is False
+
+
+def test_projector_out_norm_calibrates_to_embedding_scale():
+    torch.manual_seed(0)
+    proj = NestedProjector(16, 64, out_norm=True)
+    target = 0.0149                                  # TinyLlama embedding std
+    assert proj.calibrate_out_norm(target) is True
+    assert torch.allclose(proj.out_norm.weight, torch.full((64,), target))
+    out = proj(torch.randn(4, 8, 16))
+    # LayerNorm gives unit std, the gain rescales it to the embedding scale
+    assert abs(out.std().item() - target) < 0.2 * target
+    # and the uncalibrated projector is the ~36x-too-large case we are fixing
+    raw = NestedProjector(16, 64)(torch.randn(4, 8, 16))
+    assert raw.std().item() > 10 * target
+
+
+def test_projector_out_norm_does_not_clobber_trained_gain():
+    proj = NestedProjector(16, 32, out_norm=True)
+    with torch.no_grad():
+        proj.out_norm.weight.fill_(0.5)              # stand-in for loaded weights
+    assert proj.calibrate_out_norm(0.0149) is False
+    assert torch.allclose(proj.out_norm.weight, torch.full((32,), 0.5))
+
+
+def test_projector_out_norm_preserves_nesting():
+    torch.manual_seed(0)
+    proj = NestedProjector(16, 64, widths=[16, 32, 64], out_norm=True)
+    proj.calibrate_out_norm(0.0149)
+    for lvl, w in enumerate([16, 32, 64]):
+        proj.set_level(lvl)
+        out = proj(torch.randn(2, 5, 16))
+        assert out.shape == (2, 5, 64)
+        # inactive tail must stay exactly zero -- normalizing over the full
+        # llm_dim instead of the active slice would break this
+        assert torch.all(out[..., w:] == 0)
+        assert abs(out[..., :w].std().item() - 0.0149) < 0.2 * 0.0149
+
+
 def test_nested_lora_levels_and_frozen_base():
     base = nn.Linear(32, 48)
     lora = NestedLoRALinear(base, ranks=[4, 8, 16], alpha=1.0)

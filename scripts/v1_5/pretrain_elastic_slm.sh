@@ -69,9 +69,14 @@ case "$LLM_KEY" in
     ;;
 esac
 
-OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/elastic-pretrain-${LLM_KEY}"
-LOG_DIR="/var/scratch/skalra/flexllava/logs/elastic-pretrain-${LLM_KEY}"
-RUN_NAME="elastic-pretrain-${LLM_KEY}-tok256-144-64-16"
+# Optional run tag, e.g.  ELASTIC_RUN_TAG=outnorm sbatch run_job_pretrain_slm.sh
+# Suffixes the checkpoint/log dirs so a variant run does not overwrite the
+# untagged baseline. Stage 2 reads the same variable to find its warm-start.
+TAG="${ELASTIC_RUN_TAG:+-${ELASTIC_RUN_TAG}}"
+
+OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/elastic-pretrain-${LLM_KEY}${TAG}"
+LOG_DIR="/var/scratch/skalra/flexllava/logs/elastic-pretrain-${LLM_KEY}${TAG}"
+RUN_NAME="elastic-pretrain-${LLM_KEY}-tok256-144-64-16${TAG}"
 
 echo "[FlexLLaVA] Pretrain  LLM=${MODEL_PATH}  conv=${CONV_VERSION}"
 echo "[FlexLLaVA] Output → ${OUTPUT_DIR}"
@@ -81,6 +86,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 1.0 \
     --coral_weight 0.01 \
+    --projector_out_norm True \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path "${MODEL_PATH}" \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \
