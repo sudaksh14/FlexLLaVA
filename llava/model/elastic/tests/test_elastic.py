@@ -15,6 +15,61 @@ from llava.model.elastic import losses
 from llava.model.elastic.flops import grid_cost
 
 
+def test_sincos_pos_embed_is_deterministic_and_distinct():
+    from llava.model.elastic.resampler import sincos_2d_pos_embed
+    a = sincos_2d_pos_embed(64, 4)
+    b = sincos_2d_pos_embed(64, 4)
+    assert a.shape == (16, 64)
+    assert torch.equal(a, b)                       # fixed, not random
+    # distinct positions must get distinct encodings -- that is the whole point
+    n = torch.nn.functional.normalize(a, dim=-1)
+    off = ~torch.eye(16, dtype=torch.bool)
+    assert (n @ n.T)[off].max() < 0.999
+
+
+def test_resampler_sincos_pos_embed_is_frozen_buffer():
+    from llava.model.elastic.resampler import NestedQueryResampler
+    r = NestedQueryResampler(64, 16, num_patches=36, n_heads=4, depth=1,
+                             use_pos_embed=True, pos_embed_type="sincos2d")
+    names = {n for n, _ in r.named_parameters()}
+    assert "query_pos_embed" not in names and "patch_pos_embed" not in names
+    bufs = dict(r.named_buffers())
+    assert bufs["query_pos_embed"].shape == (16, 64)
+    assert bufs["patch_pos_embed"].shape == (1, 36, 64)   # interpolated 4x4 -> 6x6
+    # still round-trips through a state dict, so warm-start/eval rebuild it
+    assert "query_pos_embed" in r.state_dict()
+
+
+def test_resampler_learned_pos_embed_is_trainable():
+    from llava.model.elastic.resampler import NestedQueryResampler
+    r = NestedQueryResampler(64, 16, num_patches=36, n_heads=4, depth=1,
+                             use_pos_embed=True, pos_embed_type="learned")
+    names = dict(r.named_parameters())
+    assert names["query_pos_embed"].requires_grad
+    assert names["patch_pos_embed"].requires_grad
+
+
+def test_resampler_shapes_unchanged_with_pos_embed():
+    from llava.model.elastic.resampler import NestedQueryResampler
+    x = torch.randn(2, 36, 64)
+    for kind in ("learned", "sincos2d"):
+        r = NestedQueryResampler(64, 16, num_patches=36, n_heads=4, depth=1,
+                                 use_pos_embed=True, pos_embed_type=kind).eval()
+        for n_tok in (16, 8, 1):
+            assert r(x, n_tok=n_tok).shape == (2, n_tok, 64)
+
+
+def test_resampler_rejects_bad_pos_embed_config():
+    from llava.model.elastic.resampler import NestedQueryResampler
+    import pytest
+    with pytest.raises(ValueError):        # non-square query count
+        NestedQueryResampler(64, 15, num_patches=36, use_pos_embed=True,
+                             pos_embed_type="sincos2d")
+    with pytest.raises(ValueError):        # unknown type
+        NestedQueryResampler(64, 16, num_patches=36, use_pos_embed=True,
+                             pos_embed_type="rotary")
+
+
 def test_projector_out_norm_off_by_default():
     proj = NestedProjector(16, 32)
     assert proj.out_norm is None

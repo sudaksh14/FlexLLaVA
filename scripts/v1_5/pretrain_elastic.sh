@@ -30,11 +30,14 @@ LOG_ROOT=/var/scratch/skalra/flexllava/logs
 echo "[FlexLLaVA] Stage 1 output → ${CKPT_ROOT}/llava-elastic-pretrain${TAG}"
 
 deepspeed --num_gpus 2 llava/train/train_elastic.py \
-    --tok_levels 256 144 64 16 \
-    --lora_ranks 8 16 32 64 \
-    --prefix_kl_weight 1.0 \
+    --tok_levels 256 \
+    --lora_ranks 8 \
+    --prefix_kl_weight 0.1 \
+    --vision_lora_enable False \
     --coral_weight 0.01 \
-    --projector_out_norm True \
+    --use_pos_embed True \
+    --pos_embed_type learned \
+    --use_nested_dropout False \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path lmsys/vicuna-7b-v1.5 \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \

@@ -117,6 +117,15 @@ class LlavaElasticMixin:
             if cfg.use_coral_align
             else "DISABLED"
         )
+        # Worth surfacing: with nested dropout ON a level trains at randint(1, n_tok)
+        # queries, i.e. ~half its nominal budget on average and at its NOMINAL
+        # length only 1/n of the time. Not knowing which mode a run used makes its
+        # loss curve uninterpretable after the fact.
+        nested_str = (
+            "enabled  (each non-teacher level truncated to randint(1, n_tok) per step)"
+            if cfg.use_nested_dropout
+            else "DISABLED (every level trains at its exact tok_levels entry)"
+        )
         import sys as _sys
         _argv = _sys.argv
         def _av(key, default="?"):
@@ -141,6 +150,7 @@ class LlavaElasticMixin:
             f"  LLM LoRA       : {llm_lora_str}\n"
             f"  KD loss        : {kd_str}\n"
             f"  CORAL loss     : {coral_str}\n"
+            f"  Nested dropout : {nested_str}\n"
             f"{sep}\n",
             flush=True,
         )

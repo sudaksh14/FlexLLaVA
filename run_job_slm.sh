@@ -50,7 +50,7 @@ export HF_HOME=/var/scratch/skalra/.cache/huggingface
 
 # --- SLM pretrain variants (Stage 1) ---
 # Uncomment exactly one line and submit: sbatch run_job.sh
-# ./scripts/v1_5/pretrain_elastic_slm.sh tinyllama
+./scripts/v1_5/pretrain_elastic_slm.sh tinyllama
 # ./scripts/v1_5/pretrain_elastic_slm.sh mobilellama
 # ./scripts/v1_5/pretrain_elastic_slm.sh smollm2
 # ./scripts/v1_5/pretrain_elastic_slm.sh qwen0.5b

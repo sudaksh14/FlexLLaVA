@@ -40,8 +40,12 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 0.1 \
     --coral_weight 0.1 \
-    --projector_out_norm True \
-    --n_sample_students 0 \
+    --use_coral False \
+    --use_pos_embed True \
+    --pos_embed_type learned \
+    --use_nested_dropout False \
+    --vision_lora_enable False \
+    --n_sample_students 1 \
     --lora_enable True \
     --lora_r 128 \
     --lora_alpha 128 \
@@ -68,7 +72,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 100 \
-    --save_total_limit 1 \
+    --save_total_limit 5 \
     --learning_rate 2e-5 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \

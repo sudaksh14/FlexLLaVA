@@ -30,7 +30,7 @@ export WANDB_PROJECT="FlexLLaVA"
 export WANDB_DIR=/var/scratch/skalra/flexllava/wandb
 export HF_HOME=/var/scratch/skalra/.cache/huggingface
 
-# ./scripts/v1_5/pretrain_elastic.sh
+./scripts/v1_5/pretrain_elastic.sh
 ./scripts/v1_5/finetune_elastic.sh
 
 # pytest llava/model/elastic/tests/test_elastic.py -v

@@ -30,6 +30,14 @@ def _build_llava_inference_model(model_path, **kwargs):
     _cls_map = {
         "llama":         LlavaLlamaForCausalLM,
         "llava_llama":   LlavaLlamaForCausalLM,
+        # "llava" is the model_type of the ORIGINAL liuhaotian LLaVA-1.5
+        # checkpoints (this fork renamed its own to "llava_llama"). Without
+        # this entry they fall through to AutoModelForCausalLM, which in
+        # transformers >=4.36 resolves model_type "llava" to the HF-native
+        # LlavaForConditionalGeneration -- a different architecture whose
+        # state-dict layout does not match these weights. Needed to evaluate
+        # stock LLaVA-1.5 as a baseline.
+        "llava":         LlavaLlamaForCausalLM,
         "qwen2":         LlavaQwenForCausalLM,
         "llava_qwen":    LlavaQwenForCausalLM,
         "phi":           LlavaPhiForCausalLM,

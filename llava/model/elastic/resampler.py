@@ -33,9 +33,44 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def sincos_2d_pos_embed(dim: int, grid: int) -> torch.Tensor:
+    """Fixed 2-D sine-cosine positional embeddings, (grid*grid, dim).
+
+    The MAE / MQT-LLaVA formulation: half the channels encode the row index and
+    half the column index, each with the usual geometric frequency ladder.
+    """
+    if dim % 4 != 0:
+        raise ValueError(f"sincos_2d needs dim divisible by 4, got {dim}")
+    omega = 1.0 / 10000 ** (torch.arange(dim // 4, dtype=torch.float32) / (dim // 4))
+    coords = torch.arange(grid, dtype=torch.float32)
+    out = []
+    for axis in torch.meshgrid(coords, coords, indexing="ij"):
+        ang = axis.reshape(-1)[:, None] * omega[None, :]      # (grid*grid, dim/4)
+        out += [torch.sin(ang), torch.cos(ang)]
+    return torch.cat(out, dim=1)                              # (grid*grid, dim)
+
+
+def _interp_pos_embed(pos: torch.Tensor, tgt_len: int) -> torch.Tensor:
+    """Bicubic-resample a square positional grid to another square grid.
+
+    Keeps queries and patches in ONE coordinate frame: query (i,j) and patch
+    (i,j) then refer to the same place in the image, which is the whole point of
+    anchoring queries spatially. Regenerating sincos at the patch grid size
+    instead would put the two on different index ranges and break the alignment.
+    """
+    src = int(round(pos.shape[0] ** 0.5))
+    tgt = int(round(tgt_len ** 0.5))
+    if src == tgt:
+        return pos
+    d = pos.shape[1]
+    grid = pos.reshape(1, src, src, d).permute(0, 3, 1, 2)
+    grid = F.interpolate(grid, size=(tgt, tgt), mode="bicubic", align_corners=False)
+    return grid.permute(0, 2, 3, 1).reshape(tgt * tgt, d)
+
+
 class NestedQueryResampler(nn.Module):
     def __init__(self, dim, num_queries, num_patches=576, n_heads=8, depth=2,
-                 use_pos_embed: bool = False):
+                 use_pos_embed: bool = False, pos_embed_type: str = "learned"):
         """
         Args:
             dim:           hidden dim (must match ViT output dim, e.g. 1024 for CLIP-L)
@@ -44,31 +79,58 @@ class NestedQueryResampler(nn.Module):
                            use_pos_embed=True.  Sliced to actual P at runtime.
             n_heads:       attention heads (dim must be divisible)
             depth:         number of cross-attention + FFN layers
-            use_pos_embed: add learned spatial (patch) and ordering (query)
-                           positional encodings.  Marginally helpful for spatial
-                           fine-tuning tasks; not needed for caption-style pretrain.
-                           Default False to keep the baseline lean.
+            use_pos_embed: add spatial (patch) and ordering (query) positional
+                           encodings.  Measured 2026-08-04 (job 26568): with this
+                           OFF the 256 output tokens collapse to an effective rank
+                           of ~12 (TinyLlama) / ~21 (7B) out of 256, mean pairwise
+                           cosine +0.91 / +0.72, even though the learned query
+                           PARAMETERS stay near-orthogonal (rank ~235).  Spatially
+                           anonymous queries all converge on the same global
+                           summary, which is why a 16-token prefix loses nothing.
+            pos_embed_type: "learned"  -- trainable encodings, small random init.
+                            "sincos2d" -- FROZEN 2-D sine-cosine grid shared between
+                            queries and patches (the MQT-LLaVA design).  Each query
+                            is anchored to a grid position it cannot drift from, so
+                            queries cannot collapse onto one another.  Registered as
+                            buffers, so they never enter the optimizer.
         """
         super().__init__()
         self.dim = dim
         self.num_queries = num_queries
         self.use_pos_embed = use_pos_embed
+        self.pos_embed_type = pos_embed_type
 
         # Content queries — one learned vector per possible query slot.
         self.queries = nn.Parameter(torch.randn(num_queries, dim) * 0.02)
 
         if use_pos_embed:
-            # Per-query positional encoding nudges different positions to
-            # specialise on different importance levels, giving the optimizer
-            # an explicit symmetry-breaking signal for Matryoshka ordering.
-            self.query_pos_embed = nn.Parameter(torch.zeros(num_queries, dim))
-            nn.init.trunc_normal_(self.query_pos_embed, std=0.02)
+            if pos_embed_type == "sincos2d":
+                grid = int(round(num_queries ** 0.5))
+                if grid * grid != num_queries:
+                    raise ValueError(
+                        "pos_embed_type='sincos2d' needs a square query count, "
+                        f"got num_queries={num_queries}")
+                q_pos = sincos_2d_pos_embed(dim, grid)                 # (Q, dim)
+                # Buffers, not Parameters: frozen by construction, still saved in
+                # the state dict so warm-start and eval reconstruct them.
+                self.register_buffer("query_pos_embed", q_pos)
+                self.register_buffer("patch_pos_embed",
+                                     _interp_pos_embed(q_pos, num_patches).unsqueeze(0))
+            elif pos_embed_type == "learned":
+                # Per-query positional encoding nudges different positions to
+                # specialise on different importance levels, giving the optimizer
+                # an explicit symmetry-breaking signal for Matryoshka ordering.
+                self.query_pos_embed = nn.Parameter(torch.zeros(num_queries, dim))
+                nn.init.trunc_normal_(self.query_pos_embed, std=0.02)
 
-            # Per-patch spatial encoding added to KV.  CLIP already encodes
-            # position internally; this small learned residual lets the
-            # cross-attention re-tune spatial routing to the downstream task.
-            self.patch_pos_embed = nn.Parameter(torch.zeros(1, num_patches, dim))
-            nn.init.trunc_normal_(self.patch_pos_embed, std=0.02)
+                # Per-patch spatial encoding added to KV.  CLIP already encodes
+                # position internally; this small learned residual lets the
+                # cross-attention re-tune spatial routing to the downstream task.
+                self.patch_pos_embed = nn.Parameter(torch.zeros(1, num_patches, dim))
+                nn.init.trunc_normal_(self.patch_pos_embed, std=0.02)
+            else:
+                raise ValueError(f"unknown pos_embed_type={pos_embed_type!r}; "
+                                 "expected 'learned' or 'sincos2d'")
 
         self.layers = nn.ModuleList(
             [

@@ -60,7 +60,17 @@ class ElasticConfig:
     projector_out_norm: bool = False
 
     # ---- loss configuration (nested_query method) ----------------------
-    use_pos_embed: bool = False          # learned patch+query positional encodings in resampler
+    # Positional encodings in the resampler. Measured 2026-08-04 (job 26568):
+    # with use_pos_embed=False the 256 resampler outputs collapse to an effective
+    # rank of ~12 (TinyLlama) / ~21 (7B), mean pairwise cosine +0.91 / +0.72,
+    # while the query PARAMETERS stay near-orthogonal (rank ~235). Spatially
+    # anonymous queries all converge on one global summary -- which is why a
+    # 16-token prefix loses nothing versus 256.
+    use_pos_embed: bool = False
+    # "learned"  -> trainable encodings
+    # "sincos2d" -> frozen 2-D sine-cosine grid shared by queries and patches,
+    #               the MQT-LLaVA design (buffers, never in the optimizer)
+    pos_embed_type: str = "learned"
     use_prefix_kl: bool = True           # coarse-to-fine self-distillation
     prefix_kl_weight: float = 1.0
     use_nested_dropout: bool = True      # random truncation -> induces ordering

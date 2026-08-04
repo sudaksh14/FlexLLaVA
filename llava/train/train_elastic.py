@@ -148,6 +148,25 @@ def _parse_elastic_args():
                         "larger than the embeddings, which is survivable while the "
                         "backbone is frozen but is a divergence risk in a Stage-2 "
                         "full finetune.")
+    p.add_argument("--use_pos_embed", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=False, metavar="BOOL",
+                   help="Positional encodings in the resampler (default False). With "
+                        "them off the 256 resampler outputs collapse to an effective "
+                        "rank of ~12-21 out of 256 (job 26568), which is why 16 tokens "
+                        "carry as much signal as 256.")
+    p.add_argument("--pos_embed_type", choices=("learned", "sincos2d"), default="learned",
+                   help="'learned' = trainable encodings; 'sincos2d' = frozen 2-D "
+                        "sine-cosine grid shared by queries and patches, the "
+                        "MQT-LLaVA design. Only used when --use_pos_embed True.")
+    p.add_argument("--use_nested_dropout", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=True, metavar="BOOL",
+                   help="Randomly truncate each non-teacher level to randint(1, n_tok) "
+                        "queries per step (default True). This is what induces the "
+                        "Matryoshka ordering, but it means a level trains at ~half its "
+                        "nominal budget on average and at its NOMINAL length only 1/n "
+                        "of the time -- the 16-token level runs at a single visual "
+                        "token in ~6% of steps. Pass False to train each level at "
+                        "exactly its tok_levels entry.")
     p.add_argument("--n_sample_students", type=int, default=0, metavar="INT",
                    help="Students sampled per step (0=full grid, 1=Option A, etc.).")
     p.add_argument("--vision_lora_enable", type=lambda x: x.lower() not in ("false", "0", "no"),
@@ -193,7 +212,9 @@ def main():
         lora_alpha=1.0,
         use_prefix_kl=elastic_args.use_kd,     prefix_kl_weight=elastic_args.prefix_kl_weight,
         use_coral_align=elastic_args.use_coral, coral_weight=elastic_args.coral_weight,
-        use_nested_dropout=True,
+        use_pos_embed=elastic_args.use_pos_embed,
+        pos_embed_type=elastic_args.pos_embed_type,
+        use_nested_dropout=elastic_args.use_nested_dropout,
         projector_out_norm=elastic_args.projector_out_norm,
         kl_teacher_tok_level=0,                 # largest tok level is teacher
         n_sample_students=elastic_args.n_sample_students,
