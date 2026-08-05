@@ -71,7 +71,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --gradient_accumulation_steps 32 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 100 \
+    --save_steps 250 \
     --save_total_limit 5 \
     --learning_rate 2e-5 \
     --weight_decay 0. \

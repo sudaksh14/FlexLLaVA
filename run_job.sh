@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=finetune_FlexLLaVA
-#SBATCH -t 150:00:00
+#SBATCH -t 200:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=2
 #SBATCH --gres=gpu:A40:2

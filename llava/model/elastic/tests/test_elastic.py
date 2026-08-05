@@ -15,6 +15,42 @@ from llava.model.elastic import losses
 from llava.model.elastic.flops import grid_cost
 
 
+def test_elastic_config_saver_writes_into_checkpoint_dir(tmp_path):
+    import json as _json
+    import types
+    from llava.train.train import ElasticConfigSaver
+
+    cfg = ElasticConfig(tok_levels=[256, 144, 64, 16], num_query_tokens=256,
+                        use_pos_embed=True, pos_embed_type="sincos2d")
+    ckpt = tmp_path / "checkpoint-500"
+    ckpt.mkdir()
+    args = types.SimpleNamespace(local_rank=0, output_dir=str(tmp_path))
+    ElasticConfigSaver(cfg).on_save(args, types.SimpleNamespace(global_step=500), None)
+
+    got = _json.load(open(ckpt / "elastic_config.json"))
+    # the fields eval needs to rebuild the modules
+    assert got["tok_levels"] == [256, 144, 64, 16]
+    assert got["num_query_tokens"] == 256
+    assert got["use_pos_embed"] is True
+    assert got["pos_embed_type"] == "sincos2d"
+
+
+def test_elastic_config_saver_is_rank0_only_and_tolerates_missing_dir(tmp_path):
+    import types
+    from llava.train.train import ElasticConfigSaver
+
+    saver = ElasticConfigSaver(ElasticConfig())
+    ckpt = tmp_path / "checkpoint-10"
+    ckpt.mkdir()
+    # non-zero rank must not write (all ranks fire on_save; only rank 0 owns the dir)
+    saver.on_save(types.SimpleNamespace(local_rank=1, output_dir=str(tmp_path)),
+                  types.SimpleNamespace(global_step=10), None)
+    assert not (ckpt / "elastic_config.json").exists()
+    # a step whose directory does not exist must be a no-op, not a crash
+    saver.on_save(types.SimpleNamespace(local_rank=0, output_dir=str(tmp_path)),
+                  types.SimpleNamespace(global_step=999), None)
+
+
 def test_sincos_pos_embed_is_deterministic_and_distinct():
     from llava.model.elastic.resampler import sincos_2d_pos_embed
     a = sincos_2d_pos_embed(64, 4)

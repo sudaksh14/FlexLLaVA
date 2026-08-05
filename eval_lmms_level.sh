@@ -93,10 +93,18 @@ echo "GPU: $GPU_NAME  →  batch_size=${BATCH_SIZE}"
 
 # Auto-detect the conversation template from the checkpoint's base LLM.
 # lmms-eval's Llava/LlavaElastic wrapper defaults to vicuna_v1, which is only
-# correct for the original llava-v1.5-7b checkpoints. SLM backbones were
-# trained with --version chatml (TinyLlama/Qwen/StableLM) or phi (Phi-2) --
-# using the wrong template at eval time doesn't error, it silently feeds the
-# model prompts formatted differently than what it was finetuned on.
+# correct for the original llava-v1.5-7b checkpoints. Using the wrong template
+# at eval time doesn't error -- it silently feeds the model prompts formatted
+# differently than what it was finetuned on.
+#
+# This MUST mirror the CONV_VERSION case in scripts/v1_5/finetune_elastic_slm.sh:
+#   tinyllama, mobilellama          -> v1   (== vicuna_v1)
+#   qwen*, stablelm, smollm2        -> chatml
+#   phi2                            -> phi
+# TinyLlama is v1, NOT chatml: its tokenizer never registered
+# <|im_start|>/<|im_end|> as special tokens, so they fragment into context-
+# dependent BPE pieces and silently mask ~86% of labels. This block used to map
+# tinyllama -> chatml, contradicting the training scripts.
 BASE_LLM=$(python3 -c "
 import json
 try:
@@ -105,9 +113,10 @@ except Exception:
     print('')
 ")
 case "$BASE_LLM" in
-    *tinyllama*|*qwen*|*stablelm*) CONV_TEMPLATE="chatml" ;;
-    *phi*)                         CONV_TEMPLATE="phi" ;;
-    *)                              CONV_TEMPLATE="vicuna_v1" ;;
+    *tinyllama*|*mobilellama*)            CONV_TEMPLATE="vicuna_v1" ;;
+    *qwen*|*stablelm*|*smollm*)           CONV_TEMPLATE="chatml" ;;
+    *phi*)                                CONV_TEMPLATE="phi" ;;
+    *)                                    CONV_TEMPLATE="vicuna_v1" ;;
 esac
 echo "Base LLM: $BASE_LLM  →  conv_template=${CONV_TEMPLATE}"
 

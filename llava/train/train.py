@@ -926,6 +926,33 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
 
 ELASTIC_CONFIG = None  # set by train_elastic.py launcher
 
+
+class ElasticConfigSaver(transformers.TrainerCallback):
+    """Write elastic_config.json into each intermediate checkpoint directory.
+
+    The end-of-run save (bottom of train()) only covers output_dir itself. A
+    run that is still going, was cancelled, or hit the time limit leaves
+    checkpoint-N/ directories that eval and the debug/ scripts cannot load,
+    because attach_elastic_engine has no way to know tok_levels,
+    num_query_tokens, use_pos_embed, pos_embed_type, or the LoRA ranks.
+    """
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+    def on_save(self, args, state, control, **kwargs):
+        if args.local_rank not in (-1, 0):
+            return
+        import dataclasses as _dc
+        ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        if not os.path.isdir(ckpt_dir):
+            return
+        try:
+            with open(os.path.join(ckpt_dir, "elastic_config.json"), "w") as f:
+                json.dump(_dc.asdict(self.cfg), f, indent=2)
+        except OSError as e:      # never let a metadata write kill a training run
+            rank0_print(f"[elastic] could not write elastic_config.json to {ckpt_dir}: {e}")
+
 # Maps HuggingFace model_type → LlavaXxxForCausalLM class.
 # TinyLlama and SmolLM2 use model_type="llama" and are covered by LlavaLlamaForCausalLM.
 # Add new entries here when adding a new backbone file.
@@ -1197,7 +1224,16 @@ def train(attn_implementation=None):
                     tokenizer=tokenizer,
                     args=training_args,
                     **data_module)
-    
+
+    # Make every intermediate checkpoint self-describing. Without this,
+    # elastic_config.json exists only in the final output dir, so a
+    # checkpoint-N/ cannot be evaluated or diagnosed without hand-rebuilding
+    # the config -- which is what had to be done to inspect run 26573's
+    # checkpoint-1500 mid-run.
+    if ELASTIC_CONFIG is not None:
+        trainer.add_callback(ElasticConfigSaver(ELASTIC_CONFIG))
+
+
     for names, p in model.named_parameters():
         if p.requires_grad:
             rank0_print(names, "requires_grad")
