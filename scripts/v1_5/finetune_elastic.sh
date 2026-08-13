@@ -29,10 +29,16 @@
 # Optional run tag -- must match the ELASTIC_RUN_TAG used for Stage 1, since it
 # selects both the warm-start checkpoint and this run's output dir.
 TAG="${ELASTIC_RUN_TAG:+-${ELASTIC_RUN_TAG}}"
+# Warm-start tag defaults to the run tag, but can differ -- e.g. reusing a
+# v3 Stage-1 checkpoint for a v4 Stage-2 run. Without this, pointing the
+# output at an existing tag makes train.py RESUME that run instead of
+# starting fresh (it globs output_dir for checkpoint-*).
+PRETRAIN_TAG="${ELASTIC_PRETRAIN_TAG:+-${ELASTIC_PRETRAIN_TAG}}"
+: "${PRETRAIN_TAG:=$TAG}"
 CKPT_ROOT=/var/scratch/skalra/flexllava/checkpoints
 LOG_ROOT=/var/scratch/skalra/flexllava/logs
 
-echo "[FlexLLaVA] Warm-start from → ${CKPT_ROOT}/llava-elastic-pretrain${TAG}"
+echo "[FlexLLaVA] Warm-start from → ${CKPT_ROOT}/llava-elastic-pretrain${PRETRAIN_TAG}"
 echo "[FlexLLaVA] Stage 2 output  → ${CKPT_ROOT}/llava-elastic-finetune${TAG}"
 
 deepspeed --num_gpus 2 llava/train/train_elastic.py \
@@ -51,7 +57,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --lora_alpha 128 \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path liuhaotian/llava-v1.5-7b \
-    --pretrain_elastic_path "${CKPT_ROOT}/llava-elastic-pretrain${TAG}" \
+    --pretrain_elastic_path "${CKPT_ROOT}/llava-elastic-pretrain${PRETRAIN_TAG}" \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \
     --version v1 \
     --data_path /var/scratch/skalra/flexllava/data/LLaVA-Finetune/llava_v1_5_mix665k.json \
@@ -72,7 +78,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 250 \
-    --save_total_limit 5 \
+    --save_total_limit 1 \
     --learning_rate 2e-5 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \

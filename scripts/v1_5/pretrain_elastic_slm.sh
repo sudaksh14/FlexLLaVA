@@ -59,12 +59,18 @@ case "$LLM_KEY" in
     MODEL_PATH="microsoft/phi-2"
     CONV_VERSION="phi"
     ;;
+  phi3.5|phi3)
+    MODEL_PATH="microsoft/Phi-3.5-mini-instruct"
+    # NOT "phi": Phi-3.5 uses <|user|>...<|end|><|assistant|>, not Phi-2's
+    # Instruct:/Output:. All four markers are registered single tokens.
+    CONV_VERSION="phi3"
+    ;;
   stablelm)
     MODEL_PATH="stabilityai/stablelm-2-zephyr-1_6b"
     CONV_VERSION="chatml"
     ;;
   *)
-    echo "Unknown LLM_KEY='$LLM_KEY'. Choose one of: tinyllama mobilellama smollm2 qwen0.5b qwen1.5b qwen3b phi2 stablelm"
+    echo "Unknown LLM_KEY='$LLM_KEY'. Choose one of: tinyllama mobilellama smollm2 qwen0.5b qwen1.5b qwen3b phi2 phi3.5 stablelm"
     exit 1
     ;;
 esac
@@ -78,10 +84,19 @@ OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/elastic-pretrain-${LLM_KEY
 LOG_DIR="/var/scratch/skalra/flexllava/logs/elastic-pretrain-${LLM_KEY}${TAG}"
 RUN_NAME="elastic-pretrain-${LLM_KEY}-tok256-144-64-16${TAG}"
 
+# Single-GPU nodes: NUM_GPUS=1 GRAD_ACCUM=16 keeps the effective batch
+# identical (per_device * accum * gpus). Changing NUM_GPUS alone would
+# silently halve it and make the run non-comparable.
+NUM_GPUS="${NUM_GPUS:-2}"
+# Derive accumulation so the effective batch (per_device * accum * gpus)
+# is invariant to NUM_GPUS. Setting NUM_GPUS alone would otherwise halve
+# it on a 1-GPU node and make the run non-comparable.
+GRAD_ACCUM="${GRAD_ACCUM:-$(( 8 * 2 / NUM_GPUS ))}"
+echo "[FlexLLaVA] num_gpus=${NUM_GPUS}  grad_accum=${GRAD_ACCUM}  (effective batch unchanged)"
 echo "[FlexLLaVA] Pretrain  LLM=${MODEL_PATH}  conv=${CONV_VERSION}"
 echo "[FlexLLaVA] Output → ${OUTPUT_DIR}"
 
-deepspeed --num_gpus 2 llava/train/train_elastic.py \
+deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --tok_levels 256 \
     --lora_ranks 8 \
     --prefix_kl_weight 0.1 \
@@ -108,7 +123,7 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --num_train_epochs 1 \
     --per_device_train_batch_size 16 \
     --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 8 \
+    --gradient_accumulation_steps ${GRAD_ACCUM} \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \

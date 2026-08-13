@@ -15,6 +15,116 @@ from llava.model.elastic import losses
 from llava.model.elastic.flops import grid_cost
 
 
+class _FakeTok:
+    """Minimal tokenizer stand-in: only what the pad guard touches."""
+
+    def __init__(self, pad, pad_id, eos_id=2, unk="<unk>", unk_id=0):
+        self.pad_token, self._pad_id = pad, pad_id
+        self.eos_token_id = eos_id
+        self.unk_token, self.unk_token_id = unk, unk_id
+
+    @property
+    def pad_token_id(self):
+        return self._pad_id if self.pad_token is not None else None
+
+    def __setattr__(self, k, v):
+        if k == "pad_token" and getattr(self, "unk_token", None) == v and v is not None:
+            object.__setattr__(self, "_pad_id", self.unk_token_id)
+        object.__setattr__(self, k, v)
+
+
+def test_pad_guard_replaces_pad_when_it_equals_eos():
+    from llava.train.train import ensure_distinct_pad_token
+
+    # TinyLlama-1.1B-Chat ships pad == eos == '</s>' (id 2): the case that
+    # silently deleted every EOS from the training labels.
+    tok = _FakeTok(pad="</s>", pad_id=2, eos_id=2)
+    ensure_distinct_pad_token(tok)
+    assert tok.pad_token_id != tok.eos_token_id
+    assert tok.pad_token_id == 0          # fell back to unk
+
+
+def test_pad_guard_is_noop_for_llama_style_tokenizers():
+    from llava.train.train import ensure_distinct_pad_token
+
+    # Vicuna/Llama: pad already distinct from eos -> must not be touched,
+    # which is what keeps the 7B recipe byte-identical.
+    tok = _FakeTok(pad="<unk>", pad_id=0, eos_id=2)
+    ensure_distinct_pad_token(tok)
+    assert tok.pad_token == "<unk>" and tok.pad_token_id == 0
+
+
+def test_pad_guard_handles_missing_pad_token():
+    from llava.train.train import ensure_distinct_pad_token
+
+    tok = _FakeTok(pad=None, pad_id=None, eos_id=2)
+    ensure_distinct_pad_token(tok)
+    assert tok.pad_token_id == 0 and tok.pad_token_id != tok.eos_token_id
+
+
+def test_teacher_defaults_to_self_and_attaches_nothing():
+    from llava.model.elastic.engine import attach_kd_teacher
+
+    class _Eng:
+        pass
+    eng = _Eng()
+    assert attach_kd_teacher(eng, ElasticConfig(), student=None) is None
+    assert eng.kd_teacher is None          # self-distillation: no second model
+
+
+def test_teacher_rejects_unknown_mode():
+    import pytest
+    from llava.model.elastic.engine import attach_kd_teacher
+
+    class _Eng:
+        pass
+    with pytest.raises(ValueError):
+        attach_kd_teacher(_Eng(), ElasticConfig(teacher="gpt4"), student=None)
+
+
+def test_teacher_config_roundtrips_through_json():
+    import dataclasses, json as _json
+    cfg = ElasticConfig(teacher="llava", teacher_model_path="liuhaotian/llava-v1.5-7b")
+    raw = _json.loads(_json.dumps(dataclasses.asdict(cfg)))
+    valid = {f.name for f in dataclasses.fields(ElasticConfig)}
+    back = ElasticConfig(**{k: v for k, v in raw.items() if k in valid})
+    # eval rebuilds the config from elastic_config.json, so these must survive
+    assert back.teacher == "llava"
+    assert back.teacher_model_path == "liuhaotian/llava-v1.5-7b"
+
+
+def test_merge_lora_state_dict_folds_deltas_and_restores_plain_keys():
+    from llava.train.train import _merge_lora_state_dict
+
+    torch.manual_seed(0)
+    base = torch.randn(8, 6)
+    A = torch.randn(2, 6)       # (r, in)
+    B = torch.randn(8, 2)       # (out, r)
+    sd = {
+        "model.layers.0.self_attn.q_proj.base_layer.weight": base.clone(),
+        "model.layers.0.self_attn.q_proj.lora_A.default.weight": A.clone(),
+        "model.layers.0.self_attn.q_proj.lora_B.default.weight": B.clone(),
+        "elastic_projector.fc1.weight": torch.randn(3, 3),   # must pass through
+    }
+    out = _merge_lora_state_dict(sd, scale=2.0)
+
+    # the plain key from_pretrained looks for now exists, and no PEFT keys remain
+    assert "model.layers.0.self_attn.q_proj.weight" in out
+    assert not any(".base_layer." in k or ".lora_" in k for k in out)
+    assert torch.allclose(out["model.layers.0.self_attn.q_proj.weight"],
+                          base + 2.0 * (B @ A), atol=1e-5)
+    assert "elastic_projector.fc1.weight" in out
+
+
+def test_merge_lora_state_dict_is_noop_without_lora():
+    from llava.train.train import _merge_lora_state_dict
+
+    sd = {"model.embed_tokens.weight": torch.randn(4, 4),
+          "elastic_resampler.queries": torch.randn(8, 4)}
+    out = _merge_lora_state_dict(dict(sd), scale=1.0)
+    assert set(out) == set(sd)     # non-LoRA (full finetune / pretrain) path untouched
+
+
 def test_elastic_config_saver_writes_into_checkpoint_dir(tmp_path):
     import json as _json
     import types

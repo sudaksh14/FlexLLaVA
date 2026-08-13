@@ -7,6 +7,12 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --output=./jobs/run_%A.out
 #SBATCH --export=ALL,WANDB_API_KEY=dfcd2574507b9ebe69ca13ab6f6925d864e82ee0
+# Training jobs take every GPU on their node, so no other GPU job can use it.
+# --exclusive therefore also claims all 64 cores: without it, cons_tres/CR_CORE
+# confines the job to --cpus-per-task cores (task/affinity) and the rest idle
+# for nothing. It also makes the allocation robust to a smaller
+# --cpus-per-task passed at submit time.
+#SBATCH --exclusive
 
 module load cuda12.1/toolkit/12.1
 

@@ -239,6 +239,101 @@ def _load_elastic_pretrain_weights(model, path: str):
 
 
 
+def ensure_distinct_pad_token(tokenizer, model=None):
+    """Guarantee pad_token_id != eos_token_id, for every backbone family.
+
+    THE BUG THIS PREVENTS (measured on TinyLlama, 2026-08-13):
+
+      DataCollatorForSupervisedDataset builds
+          attention_mask = input_ids.ne(tokenizer.pad_token_id)
+      and prepare_inputs_labels_for_multimodal (llava_arch.py ~line 270,
+      "remove the padding using attention_mask -- FIXME") then DELETES every
+      masked position from input_ids AND labels.
+
+      So if pad_token == eos_token, every genuine end-of-turn token is treated
+      as padding and removed from the labels. The model is never trained to
+      stop. Measured: 9 EOS in the labels before expansion, 0 after; at eval
+      the model ran to max_new_tokens on 84% of GQA questions and scored 0.00%
+      exact match despite 48% of answers starting with the correct word.
+
+    TinyLlama-1.1B-Chat and several other chat-tuned SLMs ship
+    pad_token == '</s>' == eos_token. Llama/Vicuna ship no pad_token at all and
+    fall through to unk (id 0), which is why the 7B recipe was unaffected and
+    why this guard is a no-op there.
+
+    Preference order: existing distinct pad -> unk_token -> a fresh [PAD]
+    (which resizes embeddings, so it is the last resort).
+    """
+    eos_id = tokenizer.eos_token_id
+    if tokenizer.pad_token is not None and tokenizer.pad_token_id != eos_id:
+        return tokenizer.pad_token            # already safe
+
+    why = "pad_token is None" if tokenizer.pad_token is None else \
+          f"pad_token {tokenizer.pad_token!r} == eos_token"
+    unk_id = getattr(tokenizer, "unk_token_id", None)
+    if tokenizer.unk_token is not None and unk_id is not None and unk_id != eos_id:
+        tokenizer.pad_token = tokenizer.unk_token
+        rank0_print(f"[pad-guard] {why}; using unk_token "
+                    f"{tokenizer.pad_token!r} (id {tokenizer.pad_token_id}) as pad")
+    else:
+        # no distinct token available (Qwen2/Phi-2 style): mint one
+        smart_tokenizer_and_embedding_resize(
+            special_tokens_dict=dict(pad_token="[PAD]"),
+            tokenizer=tokenizer, model=model)
+        rank0_print(f"[pad-guard] {why}; added a new [PAD] token "
+                    f"(id {tokenizer.pad_token_id}) and resized embeddings")
+    assert tokenizer.pad_token_id != eos_id, "pad-guard failed to separate pad from eos"
+    return tokenizer.pad_token
+
+
+def _merge_lora_state_dict(state_dict, scale: float):
+    """Fold PEFT LoRA deltas into their base weights and restore plain HF keys.
+
+    Turns the triple
+
+        <stem>.base_layer.weight / <stem>.lora_A.default.weight
+                                 / <stem>.lora_B.default.weight
+
+    into a single `<stem>.weight` = base + scale * (B @ A).
+
+    Done on the gathered state dict rather than via PeftModel.merge_and_unload()
+    because at this point the weights have already been collected out of the
+    ZeRO shards; mutating the live DeepSpeed-wrapped model instead would be a
+    good deal more delicate for no benefit.
+
+    Keys with no LoRA attached pass through untouched. A no-op on state dicts
+    that carry no `.base_layer.weight`, so the non-LoRA path is unaffected.
+    """
+    stems = {k[: -len(".base_layer.weight")]
+             for k in state_dict if k.endswith(".base_layer.weight")}
+    if not stems:
+        return state_dict
+
+    out, merged = {}, 0
+    for stem in stems:
+        base = state_dict.pop(f"{stem}.base_layer.weight")
+        ka, kb = f"{stem}.lora_A.default.weight", f"{stem}.lora_B.default.weight"
+        if ka in state_dict and kb in state_dict:
+            A = state_dict.pop(ka).to(torch.float32)
+            B = state_dict.pop(kb).to(torch.float32)
+            # A: (r, in), B: (out, r) -> B @ A: (out, in), matching base
+            out[f"{stem}.weight"] = (base.to(torch.float32) + scale * (B @ A)).to(base.dtype)
+            merged += 1
+        else:
+            out[f"{stem}.weight"] = base
+
+    for k in list(state_dict.keys()):
+        if ".lora_A." in k or ".lora_B." in k or ".base_layer." in k:
+            rank0_print(f"[lora-merge] dropping unhandled PEFT key {k}")
+            state_dict.pop(k)
+            continue
+        out[k] = state_dict.pop(k)
+
+    rank0_print(f"[lora-merge] merged {merged} LoRA modules (scale={scale}); "
+                f"{len(out)} tensors saved with plain keys")
+    return out
+
+
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
                                    output_dir: str):
     """Collects the state dict and dump to disk."""
@@ -961,6 +1056,7 @@ _LLM_TYPE_TO_LLAVA_CLS = {
     "llava":     "LlavaLlamaForCausalLM",   # liuhaotian/llava-v1.5-7b uses model_type='llava'
     "qwen2":     "LlavaQwenForCausalLM",
     "phi":       "LlavaPhiForCausalLM",
+    "phi3":      "LlavaPhi3ForCausalLM",
     "stablelm":  "LlavaStableLMForCausalLM",
     # llava_* → loaded from a saved FlexLLaVA checkpoint via AutoModelForCausalLM
 }
@@ -973,6 +1069,7 @@ def _build_llava_model(model_name_or_path, **kwargs):
         LlavaLlamaForCausalLM,
         LlavaQwenForCausalLM,
         LlavaPhiForCausalLM,
+        LlavaPhi3ForCausalLM,
         LlavaStableLMForCausalLM,
     )
     _cls_map = {
@@ -980,6 +1077,7 @@ def _build_llava_model(model_name_or_path, **kwargs):
         "llava":    LlavaLlamaForCausalLM,
         "qwen2":    LlavaQwenForCausalLM,
         "phi":      LlavaPhiForCausalLM,
+        "phi3":     LlavaPhi3ForCausalLM,
         "stablelm": LlavaStableLMForCausalLM,
     }
     cfg = _tf.AutoConfig.from_pretrained(
@@ -1130,11 +1228,11 @@ def train(attn_implementation=None):
     elif model_args.version == "v0.5":
         tokenizer.pad_token = tokenizer.unk_token
     else:
-        # Qwen2 and Phi-2 have no unk_token; fall back to eos_token.
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = (tokenizer.unk_token
-                                   if tokenizer.unk_token is not None
-                                   else tokenizer.eos_token)
+        # Applies to every backbone family. A no-op for Llama/Vicuna (no
+        # pad_token -> unk, already distinct from eos); fires for chat SLMs
+        # like TinyLlama that ship pad_token == eos_token, where it prevents
+        # every EOS being stripped from the labels. See the docstring.
+        ensure_distinct_pad_token(tokenizer, model)
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
@@ -1268,12 +1366,26 @@ def train(attn_implementation=None):
         # model from its base_model_name_or_path (the raw HF Hub checkpoint,
         # no vision tower at all) instead of this directory, silently
         # discarding everything trained in this run.
+        #
+        # The LLM LoRA must be MERGED first. Stripping only the outer
+        # "base_model.model." prefix leaves PEFT's inner module structure
+        # intact -- `...down_proj.base_layer.weight` plus `.lora_A.default.` /
+        # `.lora_B.default.` -- while from_pretrained looks for a plain
+        # `...down_proj.weight`, finds nothing, and RANDOMLY INITIALISES every
+        # transformer layer. Run 26571 trained cleanly (loss 0.72, max
+        # grad_norm 4.60) and then emitted "elledelledelled" at eval for
+        # exactly this reason; debug/merge_lora_checkpoint.py exists to repair
+        # checkpoints written before this fix.
         full_state_dict = get_full_state_dict_maybe_zero_3(model.named_parameters())
         prefix = "base_model.model."
         full_state_dict = {
             (k[len(prefix):] if k.startswith(prefix) else k): v
             for k, v in full_state_dict.items()
         }
+        full_state_dict = _merge_lora_state_dict(
+            full_state_dict,
+            scale=training_args.lora_alpha / training_args.lora_r,
+        )
 
         if training_args.local_rank == 0 or training_args.local_rank == -1:
             model.config.save_pretrained(training_args.output_dir)

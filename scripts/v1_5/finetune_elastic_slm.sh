@@ -4,7 +4,7 @@
 # Usage:
 #   bash scripts/v1_5/finetune_elastic_slm.sh <LLM_KEY>
 #
-# LLM_KEY choices: tinyllama | mobilellama | smollm2 | qwen0.5b | qwen1.5b | qwen3b | phi2 | stablelm
+# LLM_KEY choices: tinyllama | mobilellama | smollm2 | qwen0.5b | qwen1.5b | qwen3b | phi2 | phi3.5 | stablelm
 #
 # --pretrain_elastic_path points to the Stage 1 output so elastic_resampler,
 # elastic_projector, and LoRA weights are warm-started.
@@ -68,12 +68,18 @@ case "$LLM_KEY" in
     MODEL_PATH="microsoft/phi-2"
     CONV_VERSION="phi"
     ;;
+  phi3.5|phi3)
+    MODEL_PATH="microsoft/Phi-3.5-mini-instruct"
+    # NOT "phi": Phi-3.5 uses <|user|>...<|end|><|assistant|>, not Phi-2's
+    # Instruct:/Output:. All four markers are registered single tokens.
+    CONV_VERSION="phi3"
+    ;;
   stablelm)
     MODEL_PATH="stabilityai/stablelm-2-zephyr-1_6b"
     CONV_VERSION="chatml"
     ;;
   *)
-    echo "Unknown LLM_KEY='$LLM_KEY'. Choose one of: tinyllama mobilellama smollm2 qwen0.5b qwen1.5b qwen3b phi2 stablelm"
+    echo "Unknown LLM_KEY='$LLM_KEY'. Choose one of: tinyllama mobilellama smollm2 qwen0.5b qwen1.5b qwen3b phi2 phi3.5 stablelm"
     exit 1
     ;;
 esac
@@ -81,17 +87,32 @@ esac
 # Optional run tag -- must match the ELASTIC_RUN_TAG used for Stage 1, since it
 # selects both the warm-start checkpoint and this run's output dir.
 TAG="${ELASTIC_RUN_TAG:+-${ELASTIC_RUN_TAG}}"
+# Warm-start tag defaults to the run tag, but can differ -- e.g. reusing a
+# v3 Stage-1 checkpoint for a v4 Stage-2 run. Without this, pointing the
+# output at an existing tag makes train.py RESUME that run instead of
+# starting fresh (it globs output_dir for checkpoint-*).
+PRETRAIN_TAG="${ELASTIC_PRETRAIN_TAG:+-${ELASTIC_PRETRAIN_TAG}}"
+: "${PRETRAIN_TAG:=$TAG}"
 
-PRETRAIN_CKPT="/var/scratch/skalra/flexllava/checkpoints/elastic-pretrain-${LLM_KEY}${TAG}"
+PRETRAIN_CKPT="/var/scratch/skalra/flexllava/checkpoints/elastic-pretrain-${LLM_KEY}${PRETRAIN_TAG}"
 OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-${LLM_KEY}${TAG}"
 LOG_DIR="/var/scratch/skalra/flexllava/logs/elastic-finetune-${LLM_KEY}${TAG}"
 RUN_NAME="elastic-finetune-${LLM_KEY}-tok256-144-64-16${TAG}"
 
+# Single-GPU nodes: NUM_GPUS=1 GRAD_ACCUM=64 keeps the effective batch
+# identical (per_device * accum * gpus). Changing NUM_GPUS alone would
+# silently halve it and make the run non-comparable.
+NUM_GPUS="${NUM_GPUS:-2}"
+# Derive accumulation so the effective batch (per_device * accum * gpus)
+# is invariant to NUM_GPUS. Setting NUM_GPUS alone would otherwise halve
+# it on a 1-GPU node and make the run non-comparable.
+GRAD_ACCUM="${GRAD_ACCUM:-$(( 32 * 2 / NUM_GPUS ))}"
+echo "[FlexLLaVA] num_gpus=${NUM_GPUS}  grad_accum=${GRAD_ACCUM}  (effective batch unchanged)"
 echo "[FlexLLaVA] Finetune  LLM=${MODEL_PATH}  conv=${CONV_VERSION}"
 echo "[FlexLLaVA] Pretrain checkpoint → ${PRETRAIN_CKPT}"
 echo "[FlexLLaVA] Output             → ${OUTPUT_DIR}"
 
-deepspeed --num_gpus 2 llava/train/train_elastic.py \
+deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --tok_levels 256 144 64 16 \
     --lora_ranks 8 16 32 64 \
     --prefix_kl_weight 0.1 \
@@ -126,11 +147,11 @@ deepspeed --num_gpus 2 llava/train/train_elastic.py \
     --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 2 \
-    --gradient_accumulation_steps 32 \
+    --gradient_accumulation_steps ${GRAD_ACCUM} \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
-    --save_total_limit 5 \
+    --save_total_limit 1 \
     --learning_rate 2e-5 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \

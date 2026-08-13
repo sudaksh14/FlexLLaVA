@@ -24,6 +24,54 @@ from .resampler import NestedQueryResampler, NestedProjector
 from . import losses
 
 
+def attach_kd_teacher(engine, cfg, student):
+    """Load a frozen external KD teacher when cfg.teacher != "self".
+
+    Stored on the ElasticEngine, which is a PLAIN OBJECT and not an nn.Module --
+    so the teacher never appears in the student's named_parameters(), never
+    reaches the optimizer, and is not sharded by DeepSpeed. Registering it as a
+    submodule instead would silently add 7B trainable-looking params to the run.
+
+    The KL aligns sequences from the RIGHT (see the mixin), so the teacher
+    having 576 visual tokens against the student's 256/144/64/16 is fine: the
+    trailing text positions -- the only ones with labels -- line up.
+    """
+    mode = getattr(cfg, "teacher", "self")
+    if mode == "self":
+        engine.kd_teacher = None
+        return None
+    if mode != "llava":
+        raise ValueError(f"unknown teacher={mode!r}; expected 'self' or 'llava'")
+
+    import torch as _torch
+    from llava.model import LlavaLlamaForCausalLM
+
+    path = getattr(cfg, "teacher_model_path", "liuhaotian/llava-v1.5-7b")
+    dtype = next(student.parameters()).dtype
+    print(f"[elastic] loading frozen KD teacher: {path} ({dtype})", flush=True)
+    teacher = LlavaLlamaForCausalLM.from_pretrained(path, torch_dtype=dtype)
+
+    # A KL over vocabularies that do not correspond is meaningless, and would
+    # fail silently rather than loudly -- so check it up front.
+    if teacher.config.vocab_size != student.config.vocab_size:
+        raise ValueError(
+            f"KD teacher vocab {teacher.config.vocab_size} != student vocab "
+            f"{student.config.vocab_size}. Both must share a tokenizer for the "
+            f"KL to mean anything (TinyLlama and Vicuna are both Llama-32000).")
+
+    tvt = teacher.get_vision_tower()
+    if tvt is not None and not tvt.is_loaded:
+        tvt.load_model()
+    if tvt is not None:
+        tvt.to(dtype=dtype)
+    # no elastic engine on the teacher: it runs its native full-token path
+    teacher.config.matryoshka_vis_token_scale = None
+    teacher.requires_grad_(False)
+    teacher.eval()
+    engine.kd_teacher = teacher
+    return teacher
+
+
 class ElasticEngine:
     def __init__(self, cfg, vision_tower, vision_dim, llm_dim):
         self.cfg = cfg
@@ -190,6 +238,7 @@ def attach_elastic_engine(model, cfg):
                 w.set_level(lvl)
         vt.set_level = _set_level
     engine = ElasticEngine(cfg, vt, vt.hidden_size, underlying.config.hidden_size)
+    attach_kd_teacher(engine, cfg, underlying)
     if getattr(cfg, "projector_out_norm", False):
         emb = underlying.get_input_embeddings().weight
         # Under ZeRO-3 the parameter can be sharded to a 0-element placeholder at

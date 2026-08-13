@@ -101,6 +101,7 @@ echo "GPU: $GPU_NAME  →  batch_size=${BATCH_SIZE}"
 #   tinyllama, mobilellama          -> v1   (== vicuna_v1)
 #   qwen*, stablelm, smollm2        -> chatml
 #   phi2                            -> phi
+#   phi3.5                          -> phi3  (MUST precede the *phi* case)
 # TinyLlama is v1, NOT chatml: its tokenizer never registered
 # <|im_start|>/<|im_end|> as special tokens, so they fragment into context-
 # dependent BPE pieces and silently mask ~86% of labels. This block used to map
@@ -113,6 +114,7 @@ except Exception:
     print('')
 ")
 case "$BASE_LLM" in
+    *phi-3*|*phi3*)                       CONV_TEMPLATE="phi3" ;;
     *tinyllama*|*mobilellama*)            CONV_TEMPLATE="vicuna_v1" ;;
     *qwen*|*stablelm*|*smollm*)           CONV_TEMPLATE="chatml" ;;
     *phi*)                                CONV_TEMPLATE="phi" ;;

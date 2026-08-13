@@ -236,6 +236,20 @@ class LlavaElasticMixin:
             teacher_logits = None
             teacher_tokens = None
 
+            # External KD teacher (cfg.teacher == "llava"): one frozen forward
+            # per step, shared by every level. Its 576 visual tokens make its
+            # sequence longer than any student's, which is fine -- prefix_kl
+            # aligns from the right, over the labelled text positions.
+            ext_teacher_logits = None
+            _ext = getattr(engine, "kd_teacher", None)
+            if _ext is not None and cfg.use_prefix_kl:
+                with torch.no_grad():
+                    _out = _ext(input_ids=input_ids, attention_mask=attention_mask,
+                                position_ids=position_ids, images=images,
+                                image_sizes=image_sizes, return_dict=True)
+                    ext_teacher_logits = _out.logits.detach()
+                teacher_logits = ext_teacher_logits
+
             # Sampled-student mode: teacher always runs; k students are drawn
             # uniformly without replacement from the remaining levels.
             # k=0 (default) runs the full grid. Each student is visited in
@@ -283,9 +297,15 @@ class LlavaElasticMixin:
                 ce_total += loss_item.item() / n_active
                 cur_tokens = engine.last_tokens
                 if l_tok == cfg.kl_teacher_tok_level:
-                    teacher_logits = logits.detach()
+                    # With an EXTERNAL teacher the largest level is a student
+                    # too, so only take its CORAL tokens here and let the KL
+                    # branch below run for it as well. CORAL stays self-sourced
+                    # regardless: it compares projected visual tokens, and an
+                    # external 7B's are a different width entirely.
                     teacher_tokens = cur_tokens.detach() if cur_tokens is not None else None
-                else:
+                    if ext_teacher_logits is None:
+                        teacher_logits = logits.detach()
+                if l_tok != cfg.kl_teacher_tok_level or ext_teacher_logits is not None:
                     if cfg.use_prefix_kl and teacher_logits is not None:
                         n = min(teacher_logits.shape[1], logits.shape[1])
                         s_log = logits[:, logits.shape[1] - n:]

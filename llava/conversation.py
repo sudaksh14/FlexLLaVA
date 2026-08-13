@@ -406,6 +406,27 @@ conv_phi = Conversation(
     version="phi",
 )
 
+# ---------------------------------------------------------------------------
+# Phi-3.5 template.  NOT the same format as Phi-2 above: Phi-3.5 uses
+# <|user|> ... <|end|> <|assistant|>, verified against its own chat template:
+#   '<|user|>\nQ?<|end|>\n<|assistant|>\nA.<|end|>\n'
+# All markers are registered single tokens (<|system|>=32006, <|user|>=32010,
+# <|assistant|>=32001, <|end|>=32007), so MPT-style round accounting is exact --
+# unlike TinyLlama, whose unregistered <|im_start|>/<|im_end|> fragmented and
+# silently masked ~86% of labels.
+# ---------------------------------------------------------------------------
+conv_phi3 = Conversation(
+    system="<|system|>\n"
+           "A chat between a curious user and an artificial intelligence assistant. "
+           "The assistant gives helpful, detailed, and polite answers to the user's questions.",
+    roles=("<|user|>\n", "<|assistant|>\n"),
+    messages=[],
+    offset=0,
+    sep_style=SeparatorStyle.MPT,
+    sep="<|end|>\n",
+    version="phi3",
+)
+
 default_conversation = conv_vicuna_v1
 conv_templates = {
     "default": conv_vicuna_v0,
@@ -433,6 +454,7 @@ conv_templates = {
     "stablelm":  conv_chatml,    # alias
     "tinyllama": conv_chatml,    # alias
     "phi":       conv_phi,       # Phi-2
+    "phi3":      conv_phi3,      # Phi-3.5-mini (different format from Phi-2)
 }
 
 

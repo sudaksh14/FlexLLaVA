@@ -148,6 +148,15 @@ def _parse_elastic_args():
                         "larger than the embeddings, which is survivable while the "
                         "backbone is frozen but is a divergence risk in a Stage-2 "
                         "full finetune.")
+    p.add_argument("--teacher", choices=("self", "llava"), default="self",
+                   help="KD target. 'self' (default) distills from the SAME model at "
+                        "tok_levels[0] -- no second model, and measured KL ~0.006 "
+                        "because teacher and student are identical weights. 'llava' "
+                        "uses a frozen external LLaVA-1.5-7B, so every level becomes "
+                        "a student and the KL carries real signal; costs ~14 GB/GPU.")
+    p.add_argument("--teacher_model_path", default="liuhaotian/llava-v1.5-7b",
+                   help="Checkpoint for --teacher llava. Must share the student's "
+                        "tokenizer/vocab (Llama-32000) or the KL is meaningless.")
     p.add_argument("--use_pos_embed", type=lambda x: x.lower() not in ("false", "0", "no"),
                    default=False, metavar="BOOL",
                    help="Positional encodings in the resampler (default False). With "
@@ -212,6 +221,8 @@ def main():
         lora_alpha=1.0,
         use_prefix_kl=elastic_args.use_kd,     prefix_kl_weight=elastic_args.prefix_kl_weight,
         use_coral_align=elastic_args.use_coral, coral_weight=elastic_args.coral_weight,
+        teacher=elastic_args.teacher,
+        teacher_model_path=elastic_args.teacher_model_path,
         use_pos_embed=elastic_args.use_pos_embed,
         pos_embed_type=elastic_args.pos_embed_type,
         use_nested_dropout=elastic_args.use_nested_dropout,

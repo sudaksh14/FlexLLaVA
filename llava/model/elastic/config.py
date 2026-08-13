@@ -71,6 +71,18 @@ class ElasticConfig:
     # "sincos2d" -> frozen 2-D sine-cosine grid shared by queries and patches,
     #               the MQT-LLaVA design (buffers, never in the optimizer)
     pos_embed_type: str = "learned"
+    # Where the KD target comes from.
+    #   "self"  -- the SAME model at tok_levels[kl_teacher_tok_level] (256).
+    #              Self-distillation across token budgets, no second model.
+    #              Measured 2026-08: KL ~0.006 (0.1% of the loss at weight 0.1),
+    #              because teacher and student are identical weights seeing
+    #              informationally equivalent inputs -- nothing to distill.
+    #   "llava" -- a frozen external LLaVA-1.5-7B. A genuinely stronger teacher,
+    #              so the KL carries real signal. Every level becomes a student,
+    #              including the largest. Costs ~14 GB/GPU for the frozen 7B.
+    teacher: str = "self"
+    teacher_model_path: str = "liuhaotian/llava-v1.5-7b"
+
     use_prefix_kl: bool = True           # coarse-to-fine self-distillation
     prefix_kl_weight: float = 1.0
     use_nested_dropout: bool = True      # random truncation -> induces ordering

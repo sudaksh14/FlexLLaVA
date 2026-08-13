@@ -14,6 +14,12 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --output=./jobs/run_%A.out
 #SBATCH --export=ALL,WANDB_API_KEY=dfcd2574507b9ebe69ca13ab6f6925d864e82ee0
+# Training jobs take every GPU on their node, so no other GPU job can use it.
+# --exclusive therefore also claims all 64 cores: without it, cons_tres/CR_CORE
+# confines the job to --cpus-per-task cores (task/affinity) and the rest idle
+# for nothing. It also makes the allocation robust to a smaller
+# --cpus-per-task passed at submit time.
+#SBATCH --exclusive
 
 module load cuda12.1/toolkit/12.1
 
@@ -48,9 +54,14 @@ export WANDB_PROJECT="FlexLLaVA"
 export WANDB_DIR=/var/scratch/skalra/flexllava/wandb
 export HF_HOME=/var/scratch/skalra/.cache/huggingface
 
+# Backbone selected by the first argument:  sbatch run_job_slm.sh smollm2
+# Defaults to tinyllama so existing invocations behave exactly as before.
+SLM_KEY=${1:-tinyllama}
+echo "[FlexLLaVA] SLM_KEY=${SLM_KEY}"
+
 # --- SLM pretrain variants (Stage 1) ---
 # Uncomment exactly one line and submit: sbatch run_job.sh
-./scripts/v1_5/pretrain_elastic_slm.sh tinyllama
+./scripts/v1_5/pretrain_elastic_slm.sh "$SLM_KEY"
 # ./scripts/v1_5/pretrain_elastic_slm.sh mobilellama
 # ./scripts/v1_5/pretrain_elastic_slm.sh smollm2
 # ./scripts/v1_5/pretrain_elastic_slm.sh qwen0.5b
@@ -60,7 +71,7 @@ export HF_HOME=/var/scratch/skalra/.cache/huggingface
 # ./scripts/v1_5/pretrain_elastic_slm.sh stablelm
 
 # --- SLM finetune variants (Stage 2, run after matching pretrain above) ---
-./scripts/v1_5/finetune_elastic_slm.sh tinyllama
+./scripts/v1_5/finetune_elastic_slm.sh "$SLM_KEY"
 # ./scripts/v1_5/finetune_elastic_slm.sh mobilellama
 # ./scripts/v1_5/finetune_elastic_slm.sh smollm2
 # ./scripts/v1_5/finetune_elastic_slm.sh qwen0.5b
