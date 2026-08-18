@@ -66,29 +66,52 @@ def _attach_elastic(model, ckpt_dir: str):
 
     # Load elastic weights that from_pretrained silently skips (not in base class)
     import glob as _glob
-    try:
-        from safetensors.torch import load_file as _sfload
-        shards = sorted(_glob.glob(os.path.join(ckpt_dir, "model*.safetensors")))
-        _loader = _sfload
-    except ImportError:
+    # Pick shards by what the checkpoint ACTUALLY contains, in HF's own
+    # precedence (safetensors, then .bin) -- not by which library imports.
+    # Selecting on `import safetensors` succeeding made every .bin checkpoint
+    # glob an empty list and load zero elastic weights: the LoRA save path in
+    # train.py writes pytorch_model.bin, so all llava-elastic-finetune-v3 evals
+    # ran with a randomly initialised projector and no resampler at all.
+    shards = sorted(_glob.glob(os.path.join(ckpt_dir, "model*.safetensors")))
+    if not shards:
         shards = sorted(_glob.glob(os.path.join(ckpt_dir, "pytorch_model*.bin")))
-        _loader = lambda f: torch.load(f, map_location="cpu")
+
+    def _load_shard(path):
+        if path.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            return load_file(path)
+        return torch.load(path, map_location="cpu")
 
     elastic_sd = {}
     for f in shards:
-        sd = _loader(f)
+        sd = _load_shard(f)
         for k, v in sd.items():
             if any(t in k for t in
                    ("elastic_resampler.", "elastic_projector.", ".lora_A", ".lora_B")):
                 elastic_sd[k] = v
 
-    if elastic_sd:
-        missing, unexpected = model.load_state_dict(elastic_sd, strict=False)
-        loaded = len(elastic_sd) - len(unexpected)
-        eval_logger.info(f"[elastic] loaded {loaded}/{len(elastic_sd)} elastic keys "
-                         f"(unexpected={len(unexpected)})")
-    else:
-        eval_logger.warning(f"[elastic] No elastic keys found in {ckpt_dir}")
+    if not elastic_sd:
+        # A checkpoint with elastic_config.json but no elastic tensors cannot be
+        # evaluated -- the resampler/projector would stay at random init and every
+        # score is noise. Fail loudly instead of producing a plausible-looking 0.
+        raise RuntimeError(
+            f"[elastic] No elastic weights found in {ckpt_dir} "
+            f"(scanned {len(shards)} shard(s): {[os.path.basename(s) for s in shards] or 'none'}). "
+            "elastic_config.json is present, so this checkpoint should contain "
+            "elastic_resampler.*/elastic_projector.* tensors. Evaluating without "
+            "them yields a randomly initialised projector, not a real score."
+        )
+
+    missing, unexpected = model.load_state_dict(elastic_sd, strict=False)
+    loaded = len(elastic_sd) - len(unexpected)
+    eval_logger.info(f"[elastic] loaded {loaded}/{len(elastic_sd)} elastic keys "
+                     f"(unexpected={len(unexpected)})")
+    if loaded == 0:
+        raise RuntimeError(
+            f"[elastic] {len(elastic_sd)} elastic tensors were found in {ckpt_dir} "
+            "but none matched a parameter in the attached engine -- the key names "
+            "have drifted from what attach_elastic_engine() builds."
+        )
 
     return cfg
 

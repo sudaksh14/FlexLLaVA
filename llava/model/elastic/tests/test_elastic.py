@@ -62,6 +62,89 @@ def test_pad_guard_handles_missing_pad_token():
     assert tok.pad_token_id == 0 and tok.pad_token_id != tok.eos_token_id
 
 
+class _FakeResizeTok:
+    """Tokenizer stand-in for smart_tokenizer_and_embedding_resize.
+
+    Models the Phi-2 shape: 50295 real tokens under a 51200-row embedding, and
+    no pad/unk distinct from eos, so the guard must mint one.
+    """
+
+    def __init__(self, n=50295):
+        self._n = n
+        self.pad_token = None
+        self.eos_token_id = 50256
+        self.unk_token, self.unk_token_id = "<|endoftext|>", 50256
+
+    def __len__(self):
+        return self._n
+
+    @property
+    def pad_token_id(self):
+        return self._n - 1 if self.pad_token is not None else None
+
+    def add_special_tokens(self, d):
+        self.pad_token = d["pad_token"]
+        self._n += 1
+        return 1
+
+
+class _FakeModel(nn.Module):
+    def __init__(self, rows=51200, dim=8):
+        super().__init__()
+        self.emb = nn.Embedding(rows, dim)
+        self.head = nn.Linear(dim, rows, bias=False)
+
+    def get_input_embeddings(self):
+        return self.emb
+
+    def get_output_embeddings(self):
+        return self.head
+
+    def resize_token_embeddings(self, n, pad_to_multiple_of=None):
+        if pad_to_multiple_of:
+            n = -(-n // pad_to_multiple_of) * pad_to_multiple_of
+        keep = min(n, self.emb.weight.shape[0])
+        new_emb = nn.Embedding(n, self.emb.weight.shape[1])
+        new_emb.weight.data[:keep] = self.emb.weight.data[:keep]
+        new_head = nn.Linear(self.emb.weight.shape[1], n, bias=False)
+        new_head.weight.data[:keep] = self.head.weight.data[:keep]
+        self.emb, self.head = new_emb, new_head
+        return new_emb
+
+
+def test_resize_pads_to_multiple_of_64_and_never_shrinks_below_vocab():
+    from llava.train.train import smart_tokenizer_and_embedding_resize
+
+    tok, model = _FakeResizeTok(), _FakeModel(rows=51200)
+    smart_tokenizer_and_embedding_resize(dict(pad_token="[PAD]"), tok, model)
+
+    # 50295 + 1 new = 50296 -> rounded up to 50304, not left at 50296.
+    assert len(tok) == 50296
+    assert model.emb.weight.shape[0] == 50304
+    assert model.emb.weight.shape[0] % 64 == 0
+    assert model.head.weight.shape[0] == 50304
+
+
+def test_resize_initialises_the_real_pad_row_not_the_padding_row():
+    from llava.train.train import smart_tokenizer_and_embedding_resize
+
+    tok, model = _FakeResizeTok(), _FakeModel(rows=51200)
+    with torch.no_grad():          # make the mean unmistakable
+        model.emb.weight.fill_(2.0)
+        model.head.weight.fill_(3.0)
+    smart_tokenizer_and_embedding_resize(dict(pad_token="[PAD]"), tok, model)
+
+    pad_id = tok.pad_token_id
+    assert pad_id == 50295
+    # The regression this guards: indexing by [-num_new_tokens:] would write
+    # row 50303 (alignment padding) and leave the pad row randomly initialised,
+    # corrupting a token the collator emits on every batch.
+    assert torch.allclose(model.emb.weight[pad_id],
+                          torch.full((8,), 2.0), atol=1e-5)
+    assert torch.allclose(model.head.weight[pad_id],
+                          torch.full((8,), 3.0), atol=1e-5)
+
+
 def test_teacher_defaults_to_self_and_attaches_nothing():
     from llava.model.elastic.engine import attach_kd_teacher
 

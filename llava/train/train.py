@@ -239,6 +239,55 @@ def _load_elastic_pretrain_weights(model, path: str):
 
 
 
+def align_eos_with_template(tokenizer, conv, model=None):
+    """Make tokenizer.eos_token the token the conversation template writes.
+
+    THE BUG THIS PREVENTS (measured on Phi-3.5, 2026-08-18):
+
+      conv_phi3 terminates every turn with '<|end|>' (id 32007), but
+      Phi-3.5's tokenizer ships eos_token '<|endoftext|>' (id 32000). They are
+      DIFFERENT tokens. debug/check_eos_in_labels.py found 0 eos occurrences in
+      the whole training sequence: the model would be taught to emit '<|end|>'
+      while generate() waits for '<|endoftext|>' and never stops -- the same
+      end state as the pad==eos collision, reached a different way.
+
+    A no-op for every other backbone here, because their template terminator
+    already IS their eos: v1/TinyLlama '</s>', chatml/SmolLM2+Qwen '<|im_end|>',
+    phi/Phi-2 '<|endoftext|>'. It only fires on a genuine mismatch, and a
+    genuine mismatch is always a bug.
+
+    Only rewrites eos when the terminator is a single already-registered token,
+    so it can never silently expand the vocabulary.
+    """
+    term = conv.sep2 if conv.sep_style == conversation_lib.SeparatorStyle.TWO else conv.sep
+    if not term:
+        return
+    term = term.strip()
+    if not term or term == tokenizer.eos_token:
+        return
+
+    term_id = tokenizer.convert_tokens_to_ids(term)
+    unk_id = getattr(tokenizer, "unk_token_id", None)
+    if term_id is None or term_id == unk_id:
+        rank0_print(f"[eos-align] template terminator {term!r} is not a single "
+                    f"registered token; leaving eos_token {tokenizer.eos_token!r} alone")
+        return
+
+    old = tokenizer.eos_token
+    tokenizer.eos_token = term
+    rank0_print(f"[eos-align] template terminates turns with {term!r} (id {term_id}) "
+                f"but eos_token was {old!r}; eos_token is now {term!r}")
+
+    # The tokenizer alone is not enough: generation reads eos_token_id off the
+    # model config / generation config, and those are what a later eval loads.
+    if model is not None:
+        if getattr(model, "config", None) is not None:
+            model.config.eos_token_id = term_id
+        gen = getattr(model, "generation_config", None)
+        if gen is not None:
+            gen.eos_token_id = term_id
+
+
 def ensure_distinct_pad_token(tokenizer, model=None):
     """Guarantee pad_token_id != eos_token_id, for every backbone family.
 
@@ -378,24 +427,51 @@ def smart_tokenizer_and_embedding_resize(
     tokenizer: transformers.PreTrainedTokenizer,
     model: transformers.PreTrainedModel,
 ):
-    """Resize tokenizer and embedding.
+    """Resize tokenizer and embedding, keeping the matrix tensor-core aligned.
 
-    Note: This is the unoptimized version that may make your embedding size not be divisible by 64.
+    `pad_to_multiple_of=64` matters because several backbones declare a
+    vocab_size LARGER than their tokenizer, padded for alignment. Phi-2 is the
+    sharp case: config.vocab_size 51200 vs len(tokenizer) 50295 (50257 base +
+    39 added specials). A bare resize_token_embeddings(len(tokenizer)) would
+    SHRINK 51200 -> 50296, dropping 904 rows from embed_tokens and, since
+    Phi-2 does not tie weights, 904 more from lm_head (transformers copies
+    only [:min(old, new)]). Those rows are unreachable padding so the accuracy
+    cost is ~nil, but the result is a 50296-row matrix that is not a multiple
+    of 64 and a checkpoint whose vocab_size no longer matches the base model.
+    Rounding to 50304 keeps the alignment and never shrinks below what the
+    tokenizer needs.
+
+    The new tokens must then be located BY ID, not by negative offset. With
+    padding, `[PAD]` sits at id len(tokenizer)-1 == 50295 while the matrix runs
+    to 50303, so the original `embeddings[-num_new_tokens:] = avg` would
+    initialise row 50303 and leave the real pad row at its random init -- a
+    token the collator emits on every single batch.
     """
     num_new_tokens = tokenizer.add_special_tokens(special_tokens_dict)
-    model.resize_token_embeddings(len(tokenizer))
+
+    if model is None:
+        # Tokenizer-only callers (debug/check_eos_in_labels.py inspects label
+        # masking with no model loaded). ensure_distinct_pad_token's signature
+        # already allows model=None, and Phi-2/Qwen-style backbones are exactly
+        # the ones that reach this branch, so this must not crash on them.
+        return
+
+    model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=64)
 
     if num_new_tokens > 0:
         input_embeddings = model.get_input_embeddings().weight.data
         output_embeddings = model.get_output_embeddings().weight.data
 
-        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
-            dim=0, keepdim=True)
-        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
-            dim=0, keepdim=True)
+        # Mean of the pretrained rows only, i.e. everything below the tokens we
+        # just added. Alignment padding above len(tokenizer) is excluded too.
+        n_old = len(tokenizer) - num_new_tokens
+        input_embeddings_avg = input_embeddings[:n_old].mean(dim=0, keepdim=True)
+        output_embeddings_avg = output_embeddings[:n_old].mean(dim=0, keepdim=True)
 
-        input_embeddings[-num_new_tokens:] = input_embeddings_avg
-        output_embeddings[-num_new_tokens:] = output_embeddings_avg
+        # add_special_tokens appends, so the new tokens are exactly the ids in
+        # [n_old, len(tokenizer)) -- below any alignment padding.
+        input_embeddings[n_old:len(tokenizer)] = input_embeddings_avg
+        output_embeddings[n_old:len(tokenizer)] = output_embeddings_avg
 
 
 def _tokenize_fn(strings: Sequence[str],
@@ -618,11 +694,25 @@ def preprocess_v1(
 
     # Mask targets
     sep = conv.sep + conv.roles[1] + ": "
+    n_prefix = _auto_prefix_len(tokenizer)
+    # `rounds` is split on sep2, so each `rou` is missing the separator that
+    # terminates it in the real sequence -- yet round_len below is just
+    # len(tokenizer(rou)). On Llama that accidentally balances: the re-tokenized
+    # `rou` carries a spurious BOS (+1) which exactly offsets the missing "</s>"
+    # (-1). On a tokenizer that prepends nothing there is no BOS to donate, so
+    # cur_len falls one token behind per round. Account for both explicitly.
+    if has_image:
+        sep2_len = len(tokenizer_image_token(conv.sep2, tokenizer)) - n_prefix
+    else:
+        sep2_len = len(tokenizer(conv.sep2).input_ids) - n_prefix
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
         rounds = conversation.split(conv.sep2)
-        cur_len = 1
+        # Skip the auto-prepended BOS, if this tokenizer emits one. Was
+        # hard-coded to 1; the BPE backbones (Phi-2 here) prepend nothing, so
+        # starting at 1 shifts every subsequent round's mask by one token.
+        cur_len = n_prefix
         target[:cur_len] = IGNORE_INDEX
         i = 0
         for i, rou in enumerate(rounds):
@@ -634,12 +724,16 @@ def preprocess_v1(
                 break
             parts[0] += sep
 
+            # -(n_prefix + 1): one for the auto-prepended BOS (0 on BPE
+            # tokenizers), one for the trailing space of " ASSISTANT: " that
+            # merges into the following token in context but not when parts[0]
+            # is tokenized standalone. Was hard-coded -2, i.e. n_prefix == 1.
             if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
+                round_len = len(tokenizer_image_token(rou, tokenizer)) - n_prefix + sep2_len
+                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - n_prefix - 1
             else:
-                round_len = len(tokenizer(rou).input_ids)
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+                round_len = len(tokenizer(rou).input_ids) - n_prefix + sep2_len
+                instruction_len = len(tokenizer(parts[0]).input_ids) - n_prefix - 1
 
             # `legacy` is a SentencePiece/LlamaTokenizer-only attribute describing a
             # specific BOS-reinsertion quirk in tokenizers>=0.14; non-SentencePiece
@@ -683,6 +777,49 @@ def preprocess_v1(
     )
 
 
+def _auto_prefix_len(tokenizer: transformers.PreTrainedTokenizer) -> int:
+    """How many tokens this tokenizer prepends to EVERY encode call (i.e. BOS).
+
+    preprocess_v1 / preprocess_mpt reconstruct each round, re-tokenize it, and
+    subtract a constant to undo that automatic prefix. The shipped constants
+    (`- 1`, `- 2`, `cur_len = 1`) hard-code "exactly one BOS", which holds for
+    Llama/SentencePiece (Vicuna, TinyLlama, MobileLLaMA) and is FALSE for
+    GPT-2-style BPE (SmolLM2, Qwen2.5, StableLM-2, Phi-2, Phi-3.5), which
+    prepend nothing. On those, `sep_len` collapses to 0, so cur_len stops
+    advancing past the separator and the mask window slides one token earlier
+    every round -- leaving role-marker fragments ("istant\\n", "<|im_start|>")
+    supervised and the answer's own tokens masked. Measured on SmolLM2: only
+    3.1% of short-answer samples had EOS supervised, and the supervised span
+    was role scaffolding rather than the answer.
+
+    Deriving it from the tokenizer is a no-op for the BOS-adding backbones
+    (it returns 1, reproducing the old constants exactly), so the working
+    7B/TinyLlama recipes are unaffected.
+    """
+    cached = getattr(tokenizer, "_llava_auto_prefix_len", None)
+    if cached is None:
+        cached = len(tokenizer("").input_ids)
+        tokenizer._llava_auto_prefix_len = cached
+    return cached
+
+
+# Job 26687, Phi-3.5: what a span costs STANDALONE vs. in context.
+#
+#     '<|end|>'               standalone 2   in context 1   (+1)
+#     '<|user|>'              standalone 2   in context 1   (+1)
+#     '<|end|><|assistant|>'  standalone 3   in context 2   (+1)
+#     'Yes'                   standalone 1   in context 1   ( 0)
+#
+# SentencePiece inserts a dummy '_' before the first piece of every encode
+# call, and a registered special token cannot absorb it. Every span in the
+# phi3 template starts with a special token, so standalone round accounting
+# ran ahead every round. An "append to a fixed anchor" measurement was tried
+# to cancel that and REGRESSED SmolLM2 to 1 supervised token per sample --
+# BPE merges the anchor with the span's first character. preprocess_mpt now
+# tokenizes true prefixes of the real conversation instead, which has no
+# boundary to get wrong.
+
+
 def preprocess_mpt(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
@@ -723,10 +860,6 @@ def preprocess_mpt(
 
     # Mask targets
     sep = conv.sep + conv.roles[1]
-    if has_image:
-        sep_len = len(tokenizer_image_token(conv.sep, tokenizer)) - 1
-    else:
-        sep_len = len(tokenizer(conv.sep).input_ids) - 1
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
@@ -734,9 +867,21 @@ def preprocess_mpt(
         re_rounds = [conv.sep.join(rounds[:3])] # system + user + gpt
         for conv_idx in range(3, len(rounds), 2):
             re_rounds.append(conv.sep.join(rounds[conv_idx:conv_idx+2]))    # user + gpt
-        cur_len = 0
+        # Boundaries are located by tokenizing TRUE PREFIXES of this exact
+        # conversation string, never a span in isolation. Both earlier schemes
+        # measured spans out of context and needed a correction term for what
+        # that changed -- a constant for BOS (wrong on SentencePiece's dummy
+        # '_'), then a synthetic anchor (wrong on BPE, which merges the anchor
+        # with the span's first character: it collapsed SmolLM2 to 1 supervised
+        # token per sample while leaving Qwen intact). A prefix of the real
+        # string has no boundary to get wrong, so no correction term exists to
+        # be wrong about.
+        tk_len = ((lambda s: len(tokenizer_image_token(s, tokenizer))) if has_image
+                  else (lambda s: len(tokenizer(s).input_ids)))
+        cur_len = tk_len("")           # BOS / dummy prefix, whatever this tokenizer emits
         target[:cur_len] = IGNORE_INDEX
         i = 0
+        cur_char = 0
         for i, rou in enumerate(re_rounds):
             if rou == "":
                 break
@@ -746,31 +891,20 @@ def preprocess_mpt(
                 break
             parts[0] += sep
 
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 1
-            else:
-                round_len = len(tokenizer(rou).input_ids)
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 1
+            # Character offsets into `conversation`, converted to token offsets
+            # by tokenizing the prefix that ends there. re_rounds were rejoined
+            # from chunks that split() stripped conv.sep from, so each round
+            # occupies len(rou) + len(conv.sep) characters of the original.
+            instr_end = tk_len(conversation[:cur_char + len(parts[0])])
+            cur_char += len(rou) + len(conv.sep)
+            round_end = tk_len(conversation[:cur_char])
 
-            if i != 0 and getattr(tokenizer, 'legacy', False) and IS_TOKENIZER_GREATER_THAN_0_14:
-                round_len += 1
-                instruction_len += 1
-
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
-
-            cur_len += round_len
-            # Each re_round was reconstructed by rejoining `rounds` chunks that
-            # conversation.split(conv.sep) had already stripped the separator
-            # from -- both the one trailing THIS round and (for every round
-            # after the first) the one that preceded it. Every round boundary
-            # in the ORIGINAL fully tokenized conversation costs one conv.sep,
-            # so one must be added back per round processed, not just once at
-            # the end -- otherwise cur_len falls further behind total_len with
-            # every additional turn, and multi-turn conversations (most of the
-            # finetune set) fail the mismatch check below almost every time
-            # even though the round-by-round masking itself was done correctly.
-            cur_len += sep_len
+            target[cur_len:instr_end] = IGNORE_INDEX
+            cur_len = round_end
+            # No separator fix-up here any more. cur_char already advanced past
+            # this round's conv.sep, so round_end counts it; the old
+            # `cur_len += sep_len` existed only because round_len was measured
+            # on a span that split() had stripped the separator from.
         target[cur_len:] = IGNORE_INDEX
 
         if cur_len < tokenizer.model_max_length:
@@ -1228,15 +1362,21 @@ def train(attn_implementation=None):
     elif model_args.version == "v0.5":
         tokenizer.pad_token = tokenizer.unk_token
     else:
+        # Order matters: resolve the template, align eos to the terminator it
+        # actually writes, THEN separate pad from eos -- the pad guard compares
+        # against eos, so it has to run against the final value.
+        if model_args.version in conversation_lib.conv_templates:
+            conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
+        else:
+            conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+
+        align_eos_with_template(tokenizer, conversation_lib.default_conversation, model)
+
         # Applies to every backbone family. A no-op for Llama/Vicuna (no
         # pad_token -> unk, already distinct from eos); fires for chat SLMs
         # like TinyLlama that ship pad_token == eos_token, where it prevents
         # every EOS being stripped from the labels. See the docstring.
         ensure_distinct_pad_token(tokenizer, model)
-        if model_args.version in conversation_lib.conv_templates:
-            conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
-        else:
-            conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(

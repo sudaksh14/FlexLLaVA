@@ -4,7 +4,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:A10:1
-#SBATCH --nodelist=node207
 #SBATCH --cpus-per-task=8
 #SBATCH --output=./jobs/eval_baseline_%A.out
 
@@ -32,8 +31,33 @@
 # Submit: sbatch eval_lmms_baseline_llava.sh
 
 MODEL_PATH="${1:-liuhaotian/llava-v1.5-7b}"     # resolved from the HF cache
-MODEL_TAG="llava-v1.5-7b-baseline"
+# Tag defaults to the stock-7B name for a bare invocation, but any other
+# checkpoint gets its own directory -- otherwise the TinyLLaVA control's scores
+# would land on top of the 7B baseline's and summarize_eval.py would mix them.
+if [ "$MODEL_PATH" = "liuhaotian/llava-v1.5-7b" ]; then
+    MODEL_TAG="${2:-llava-v1.5-7b-baseline}"
+else
+    MODEL_TAG="${2:-$(basename "$MODEL_PATH")}"
+fi
 LABEL="576tok-native"
+
+# Same auto-detection as eval_lmms_level.sh: the plain wrapper defaults to
+# vicuna_v1, which is right for LLaVA-1.5 and for the TinyLlama control, but
+# silently wrong for a chatml or phi backbone.
+BASE_LLM=$(python3 -c "
+import json
+try:
+    print(json.load(open('${MODEL_PATH}/config.json')).get('_name_or_path', '').lower())
+except Exception:
+    print('')
+")
+case "$BASE_LLM" in
+    *phi-3*|*phi3*)                       CONV_TEMPLATE="phi3" ;;
+    *tinyllama*|*mobilellama*)            CONV_TEMPLATE="vicuna_v1" ;;
+    *qwen*|*stablelm*|*smollm*)           CONV_TEMPLATE="chatml" ;;
+    *phi*)                                CONV_TEMPLATE="phi" ;;
+    *)                                    CONV_TEMPLATE="vicuna_v1" ;;
+esac
 LOG_ROOT=/var/scratch/skalra/flexllava/eval_logs
 OUTDIR="${LOG_ROOT}/${MODEL_TAG}/${LABEL}"
 
@@ -59,7 +83,8 @@ cd /home/skalra/FlexLLaVA
 echo "Job started: $(date)"
 echo "Node: $(hostname)"
 nvidia-smi | head -12
-echo "Model:  $MODEL_PATH   (stock LLaVA-1.5-7B, native 576 visual tokens)"
+echo "Model:  $MODEL_PATH   (non-elastic, native 576 visual tokens)"
+echo "Tag:    $MODEL_TAG   conv_template=$CONV_TEMPLATE"
 echo "Tasks:  $TASKS"
 echo "Batch:  $BATCH_SIZE"
 
@@ -68,13 +93,13 @@ mkdir -p "$OUTDIR"
 
 echo ""
 echo "══════════════════════════════════════════════════"
-echo "  BASELINE  stock LLaVA-1.5-7B  (max / native token budget)"
+echo "  BASELINE  ${MODEL_TAG}  (native 576-token budget, no compression)"
 echo "══════════════════════════════════════════════════"
 
 accelerate launch --num_processes=1 \
     -m lmms_eval \
     --model       llava \
-    --model_args  "pretrained=${MODEL_PATH},conv_template=vicuna_v1" \
+    --model_args  "pretrained=${MODEL_PATH},conv_template=${CONV_TEMPLATE}" \
     --tasks       "$TASKS" \
     --batch_size  $BATCH_SIZE \
     --log_samples \
@@ -90,13 +115,16 @@ echo "Done baseline: $(date)"
 # sequence length, so it can be computed here for free -- no GPU needed. This
 # gives the baseline a FLOPs/latency/memory row comparable to the elastic runs.
 echo ""
-echo "=== analytic efficiency (stock LLaVA-1.5-7B, 576 visual tokens) ==="
-python3 - << 'PYEOF'
+echo "=== analytic efficiency (${MODEL_TAG}, 576 visual tokens) ==="
+MODEL_PATH="$MODEL_PATH" python3 - << 'PYEOF'
 from transformers import AutoConfig
 import llava.model  # registers the llava_* configs
 from llava.eval.efficiency import ElasticAnalyzer, vision_tower_gflops
 
-cfg = AutoConfig.from_pretrained("liuhaotian/llava-v1.5-7b")
+import os
+# Must follow the checkpoint being evaluated: hardcoding the 7B here printed
+# 7B FLOPs/memory for whatever model was actually scored.
+cfg = AutoConfig.from_pretrained(os.environ["MODEL_PATH"])
 TEXT_LEN, GEN, NTOK = 64, 32, 576
 for hw in ["jetson_orin_nano_8gb", "nvidia_A10"]:
     an = ElasticAnalyzer(cfg, hw)

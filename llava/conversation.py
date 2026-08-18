@@ -408,12 +408,19 @@ conv_phi = Conversation(
 
 # ---------------------------------------------------------------------------
 # Phi-3.5 template.  NOT the same format as Phi-2 above: Phi-3.5 uses
-# <|user|> ... <|end|> <|assistant|>, verified against its own chat template:
+# <|user|> ... <|end|> <|assistant|>, per its own chat template:
 #   '<|user|>\nQ?<|end|>\n<|assistant|>\nA.<|end|>\n'
-# All markers are registered single tokens (<|system|>=32006, <|user|>=32010,
-# <|assistant|>=32001, <|end|>=32007), so MPT-style round accounting is exact --
-# unlike TinyLlama, whose unregistered <|im_start|>/<|im_end|> fragmented and
-# silently masked ~86% of labels.
+# The markers are registered single tokens (<|system|>=32006, <|user|>=32010,
+# <|assistant|>=32001, <|end|>=32007).
+#
+# Kept byte-faithful to Phi-3.5's own chat template, including the newlines.
+# Job 26687 measured that they are free: '<|end|>\n' costs 1 token in context,
+# exactly as '<|end|>' does, because SentencePiece absorbs the newline. Dropping
+# them (tried, reverted) changed nothing.
+#
+# Phi-3.5 ships eos_token '<|endoftext|>' (32000), which is NOT the token this
+# template writes. train.align_eos_with_template() repoints eos_token at
+# '<|end|>' (32007) so the model is trained to emit what generate() stops on.
 # ---------------------------------------------------------------------------
 conv_phi3 = Conversation(
     system="<|system|>\n"

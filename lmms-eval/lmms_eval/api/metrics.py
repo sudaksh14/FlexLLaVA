@@ -1,4 +1,5 @@
 import math
+import os
 from collections.abc import Iterable
 
 import numpy as np
@@ -143,7 +144,19 @@ def acc_mutual_info_fn(items):  # This is a passthrough function
     return items
 
 
-exact_match = evaluate.load("exact_match")
+# experiment_id must be unique per concurrent process. `evaluate` takes a lock on
+# a shared cache file named after it, so two array tasks of the same eval job that
+# overlap in time collide and one dies at finalize with "another evaluation module
+# instance is already using the local cache file" -- after the full generation pass
+# has already run. That silently cost the 256tok level of the SmolLM2 eval (26653_0).
+_EXPERIMENT_ID = "-".join(
+    filter(None, [
+        os.environ.get("SLURM_ARRAY_JOB_ID") or os.environ.get("SLURM_JOB_ID"),
+        os.environ.get("SLURM_ARRAY_TASK_ID"),
+        str(os.getpid()),
+    ])
+)
+exact_match = evaluate.load("exact_match", experiment_id=_EXPERIMENT_ID)
 
 
 @register_metric(

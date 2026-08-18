@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=eval_lmms
-#SBATCH -t 100:00:00
+#SBATCH -t 24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
