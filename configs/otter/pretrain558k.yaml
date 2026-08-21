@@ -1,0 +1,30 @@
+# Stage 1 (feature alignment) mixture: LLaVA-Pretrain blip_laion_cc_sbu_558k.
+#
+# Declared as ONE named source with its own data_path rather than via
+# `partition:`. The pretrain images are sharded by directory
+# (`00453/004539375.jpg`), so `partition.by: image_prefix` would invent ~500
+# bogus "sources" -- one per shard directory -- and then fail because none of
+# them is declared here. There is genuinely only one data source at this stage.
+#
+# What the Otter pipeline buys in Stage 1, given there is only one source and
+# (per pretrain_otter_slm.sh) only one tok_level:
+#   * the pre-run verification gate -- the main reason to bother. A Stage-1 run
+#     is ~10h; EOS/pad/label-masking defects are all detectable in seconds.
+#   * deterministic dropping of unreadable images instead of random substitution
+#   * supervision-density and throughput telemetry
+# Per-SOURCE and per-LEVEL gap telemetry are inert here by construction (one
+# source, one level). They come into their own in Stage 2.
+version: 1
+
+defaults:
+  image_folder: /var/scratch/skalra/flexllava/data/LLaVA-Pretrain
+
+sources:
+  pretrain558k:
+    data_path: /var/scratch/skalra/flexllava/data/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json
+    num_samples: -1        # all 558k
+
+packing:
+  enabled: false           # 1 caption per image; nothing to merge
+
+seed: 0

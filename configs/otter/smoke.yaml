@@ -1,0 +1,31 @@
+# Tiny mixture for the end-to-end smoke test (jobs/smoke_otter_train.sh).
+# Small enough to run a handful of real training steps in minutes, but it
+# exercises every path: partitioning, packing, resampling (both up and down),
+# text-only samples, and per-source telemetry with several sources present.
+version: 1
+
+defaults:
+  image_folder: /var/scratch/skalra/flexllava/data/LLaVA-Finetune
+
+partition:
+  data_path: /var/scratch/skalra/flexllava/data/LLaVA-Finetune/llava_v1_5_mix665k.json
+  by: image_prefix
+
+sources:
+  coco:      {num_samples: 60}
+  gqa:       {num_samples: 40}
+  ocr_vqa:   {num_samples: 40}
+  textvqa:   {num_samples: 30}
+  vg:        {num_samples: 20}
+  text_only: {num_samples: 20}
+
+packing:
+  enabled: true
+  sources: [coco]
+  max_turns: 6
+  max_chars: 6000
+  min_pack: 2
+  shuffle_within_pack: true
+  seed: 0
+
+seed: 0

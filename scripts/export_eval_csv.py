@@ -24,10 +24,12 @@ MODELS = {
     "llava-elastic-finetune-v3-merged": ("FlexLLaVA-7B", "Vicuna-7B-v1.5", "elastic (nested resampler)"),
     "elastic-finetune-tinyllama-v4":    ("FlexTinyLLaVA-1.1B", "TinyLlama-1.1B-Chat-v1.0", "elastic (nested resampler)"),
     "llava-v1.5-7b-baseline":           ("LLaVA-1.5-7B (reference)", "Vicuna-7B-v1.5", "mlp2x_gelu (no compression)"),
+    "baseline-tinyllama-576tok":        ("TinyLLaVA control (ours)", "TinyLlama-1.1B-Chat-v1.0", "mlp2x_gelu (no compression)"),
+    "elastic-finetune-smollm2-v4":      ("FlexLLaVA-SmolLM2-1.7B", "SmolLM2-1.7B-Instruct", "elastic (nested resampler)"),
 }
 SUPERSEDED = ["llava-elastic-finetune", "llava-elastic-finetune-v3",
               "elastic-finetune-tinyllama", "elastic-finetune-tinyllama-v3",
-              "elastic-finetune-smollm2-v4", "llava-elastic-pretrain"]
+              "llava-elastic-pretrain"]
 
 LEVEL_TOKENS = {"256tok": 256, "144tok": 144, "64tok": 64, "16tok": 16, "576tok-native": 576}
 METRICS = [("mme/mme_percetion_score", "mme_perception", 1),
@@ -79,8 +81,9 @@ cols = ["model", "backbone", "architecture", "tok_level", "n_visual_tokens",
         "jetson_prefill_ms", "jetson_peak_mem_gb", "jetson_fits",
         "a10_prefill_ms", "a10_peak_mem_gb", "a10_fits", "checkpoint", "run_dir"]
 order = {"256tok": 0, "144tok": 1, "64tok": 2, "16tok": 3, "576tok-native": 4}
-mo = {"FlexLLaVA-7B": 0, "FlexTinyLLaVA-1.1B": 1,
-      "LLaVA-1.5-7B (reference)": 2, "TinyLLaVA (published)": 3}
+mo = {"FlexLLaVA-7B": 0, "FlexTinyLLaVA-1.1B": 1, "FlexLLaVA-SmolLM2-1.7B": 2,
+      "TinyLLaVA control (ours)": 3,
+      "LLaVA-1.5-7B (reference)": 4, "TinyLLaVA (published)": 5}
 rows.sort(key=lambda r: (mo.get(r["model"], 9), order.get(r["tok_level"], 9)))
 
 os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)

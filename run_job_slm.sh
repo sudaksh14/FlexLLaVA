@@ -10,7 +10,7 @@
 #SBATCH -t 200:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=2
-#SBATCH --gres=gpu:A10:2
+#SBATCH --gres=gpu:A40:2
 #SBATCH --cpus-per-task=32
 #SBATCH --output=./jobs/run_%A.out
 #SBATCH --export=ALL,WANDB_API_KEY=dfcd2574507b9ebe69ca13ab6f6925d864e82ee0

@@ -1,0 +1,96 @@
+# Detail-heavy mixture + packing: the actual experiment.
+#
+# THE HYPOTHESIS THIS TESTS
+# -------------------------
+# The elasticity axis currently produces no tradeoff: 16 visual tokens scores
+# the same as 256. One explanation is the mixture. mix665k is 55% coco and 13%
+# vg -- captioning and scene-level QA that a coarse global summary answers just
+# as well as a fine one -- against only ~15% (ocr_vqa + textvqa) that requires
+# actually reading the image. If a 256-token budget can beat a 16-token one
+# anywhere, it is there.
+#
+# Run the baseline config FIRST and look at `otter/gap/<source>` in wandb
+# (ce_tok16 - ce_tok256, per source). If that gap is ~0 even on ocr_vqa and
+# textvqa, the mixture is NOT the bottleneck -- the resampler is -- and this
+# config is wasted compute. Only run it if the gap is visibly larger on the
+# detail-hungry sources than on coco.
+#
+# WHAT CHANGES vs. mix665k_baseline.yaml
+# --------------------------------------
+#   ocr_vqa   80,000 -> 160,000  (2x, every sample exactly twice)
+#   textvqa   21,953 ->  65,859  (3x)
+#   coco     364,100 -> 240,000  (0.66x, seeded random subset)
+#   vg        86,417 ->  86,417  (unchanged)
+#   gqa       72,140 ->  72,140  (unchanged)
+#   text_only 40,688 ->  60,000  (1.5x -- small LLMs lose language ability
+#                                 faster than 7B ones during a full Stage-2
+#                                 finetune, and several eval failures on this
+#                                 project have been language-side)
+#
+# Detail-hungry share (ocr_vqa + textvqa):
+#   baseline  (80,000 + 21,953) / 665,298 = 15.3%
+#   this one (160,000 + 65,859) / 684,416 = 33.0%   by SAMPLE count
+# Epoch size is about the same, so step count and wall clock stay comparable.
+#
+# Caveat worth holding onto: with packing on, sample share is no longer the
+# same thing as content share. coco packs 364,100 records into 284,097 samples
+# (1.28 records per sample), so its 240,000 samples carry ~307,700 records of
+# content. Measured against original-record equivalents the detail-hungry share
+# is 30.0% rather than 33.0%. Both are roughly double the baseline, which is
+# the point, but quote the right one when comparing runs.
+#
+# Packing is on for coco ONLY. The original plan was to pack the short-QA
+# sources, but measurement killed that: gqa, ocr_vqa, vg and textvqa each have
+# exactly one record per image (nothing to merge), and the first three are
+# already packed upstream at 10, 5 and 10 QA pairs per record. coco is the one
+# source with 4.11 records per image. See the packing block below for the
+# numbers, and watch `otter/supervised_frac` to confirm it moved.
+version: 1
+
+defaults:
+  image_folder: /var/scratch/skalra/flexllava/data/LLaVA-Finetune
+
+partition:
+  data_path: /var/scratch/skalra/flexllava/data/LLaVA-Finetune/llava_v1_5_mix665k.json
+  by: image_prefix
+
+sources:
+  coco:      {num_samples: 240000}
+  vg:        {num_samples: -1}
+  gqa:       {num_samples: -1}
+  ocr_vqa:   {num_samples: 160000}
+  textvqa:   {num_samples: 65859}
+  text_only: {num_samples: 60000}
+
+packing:
+  enabled: true
+  # MEASURED, not assumed (jobs/mixstat_26732.out). Records per distinct image:
+  #
+  #     coco     364,100 records / 88,524 images = 4.11   <- packable
+  #     gqa       72,140 /  72,140 = 1.00                 <- nothing to merge
+  #     ocr_vqa   80,000 /  80,000 = 1.00                 <- nothing to merge
+  #     vg        86,417 /  86,417 = 1.00                 <- nothing to merge
+  #     textvqa   21,953 /  21,953 = 1.00                 <- nothing to merge
+  #
+  # gqa/ocr_vqa/vg are ALREADY packed upstream, and harder than this config
+  # would pack them: median turns are 20, 10 and 20 respectively -- i.e. 10, 5
+  # and 10 QA pairs already sharing one visual prefix. textvqa is uniformly
+  # 2 turns, but every one of its images is unique, so there is no second
+  # record to merge it with. Listing any of them here would be a silent no-op.
+  #
+  # coco is the only source with headroom: 99.8% of its records share their
+  # image with at least one other, and ~52% are short (2 or 4 turns) -- the
+  # VQAv2/OKVQA-style entries that reference COCO images, as opposed to the
+  # long LLaVA-Instruct detail descriptions (which reach 550 turns).
+  #
+  # max_turns doubles as the per-member eligibility filter: only records with
+  # FEWER than max_turns turns are candidates, so a 550-turn detail description
+  # is never swept into a pack.
+  sources: [coco]
+  max_turns: 6        # up to 3 short QA pairs per packed sample
+  max_chars: 6000     # ~1.5k tokens of text, leaving room for the visual prefix
+  min_pack: 2
+  shuffle_within_pack: true
+  seed: 0
+
+seed: 0

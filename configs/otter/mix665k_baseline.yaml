@@ -1,0 +1,34 @@
+# Baseline mixture: llava_v1_5_mix665k, reproduced exactly.
+#
+# Every source is kept whole (num_samples: -1) and packing is off, so this
+# trains on the same 665,298 samples in the same proportions as the current
+# scripts/v1_5/finetune_elastic_slm.sh recipe.
+#
+# It exists so the Otter pipeline can be A/B'd against the shipped one with
+# only the pipeline changing, and so the per-source telemetry can be collected
+# on the UNMODIFIED mixture -- which is the measurement that decides whether
+# reweighting is worth doing at all (see mix665k_ocr_heavy.yaml).
+version: 1
+
+defaults:
+  image_folder: /var/scratch/skalra/flexllava/data/LLaVA-Finetune
+
+partition:
+  data_path: /var/scratch/skalra/flexllava/data/LLaVA-Finetune/llava_v1_5_mix665k.json
+  by: image_prefix
+
+# Observed composition of mix665k (total 665,298):
+#   coco 364,100 | vg 86,417 | ocr_vqa 80,000 | gqa 72,140
+#   text_only 40,688 | textvqa 21,953
+sources:
+  coco:      {num_samples: -1}
+  vg:        {num_samples: -1}
+  gqa:       {num_samples: -1}
+  ocr_vqa:   {num_samples: -1}
+  textvqa:   {num_samples: -1}
+  text_only: {num_samples: -1}
+
+packing:
+  enabled: false
+
+seed: 0
