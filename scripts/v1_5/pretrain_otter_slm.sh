@@ -46,7 +46,16 @@ RUN_NAME="otter-pretrain-${LLM_KEY}-tok256${TAG}"
 OTTER_CACHE_DIR="${OTTER_CACHE_DIR:-/var/scratch/skalra/flexllava/cache/otter}"
 
 NUM_GPUS="${NUM_GPUS:-2}"
-GRAD_ACCUM="${GRAD_ACCUM:-$(( 2 * 2 / NUM_GPUS ))}"
+# Derive accumulation so the effective batch (per_device * accum * gpus) is
+# invariant to NUM_GPUS and MATCHES pretrain_elastic_slm.sh: 16 * 8 * 2 = 256,
+# which is LLaVA's standard Stage-1 batch.
+#
+# This was 2*2/NUM_GPUS in the first version of this script -- accum 2, i.e. an
+# effective batch of 64, a 4x smaller batch at the same LR 1e-3. That produced
+# otter-pretrain-tinyllama-otter1, whose Stage-1 loss ran ~0.8 HIGHER than the
+# v4 checkpoint throughout (3.07 vs 2.26), and every Stage-2 and eval number
+# warm-started from it inherited the deficit. Do not "simplify" this again.
+GRAD_ACCUM="${GRAD_ACCUM:-$(( 8 * 2 / NUM_GPUS ))}"
 BATCH="${OTTER_BATCH:-16}"
 
 echo "[FlexLLaVA/otter] Pretrain  LLM=${MODEL_PATH}  conv=${CONV_VERSION}"
