@@ -71,6 +71,13 @@ class ElasticConfig:
     # "sincos2d" -> frozen 2-D sine-cosine grid shared by queries and patches,
     #               the MQT-LLaVA design (buffers, never in the optimizer)
     pos_embed_type: str = "learned"
+    # How the resampler picks its n_tok output tokens out of the query bank.
+    # DEFAULT "prefix": the original, only-ever-run behaviour (queries[:n_tok],
+    # content-agnostic). See NestedQueryResampler's docstring (resampler.py)
+    # for "magnitude" / "attn_energy" / "learned" -- untested alternatives that
+    # rank the full query bank by an importance criterion instead of slicing by
+    # fixed position. Not wired into any launcher script; opt in explicitly.
+    query_selection: str = "prefix"
     # Where the KD target comes from.
     #   "self"  -- the SAME model at tok_levels[kl_teacher_tok_level] (256).
     #              Self-distillation across token budgets, no second model.
@@ -85,7 +92,14 @@ class ElasticConfig:
 
     use_prefix_kl: bool = True           # coarse-to-fine self-distillation
     prefix_kl_weight: float = 1.0
-    use_nested_dropout: bool = True      # random truncation -> induces ordering
+    # Random truncation -> intended to induce prefix ordering (see
+    # NestedQueryResampler's docstring, resampler.py). Default False because
+    # every run through v5 has passed --use_nested_dropout False in both
+    # launcher scripts; this default now matches what has actually been run,
+    # it does not reflect a judgment that the mechanism doesn't help -- it is
+    # untested with vision_lora_enable also on and remains a candidate
+    # explanation for the flat token-budget result. Opt in explicitly.
+    use_nested_dropout: bool = False
     use_coral_align: bool = True         # latent-stability alignment
     coral_weight: float = 0.1
     use_recon: bool = False

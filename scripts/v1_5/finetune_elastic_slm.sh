@@ -34,7 +34,16 @@
 #
 # NOTE: --lora_enable controls PEFT LoRA on the *LLM* only. The rank-nested
 # LoRA on the vision tower -- the actual elastic mechanism -- is controlled by
-# --vision_lora_enable (default True) and stays ON.
+# --vision_lora_enable.
+#
+# ── v5 (2026-08-31): vision_lora_enable turned on as the next ablation arm ──
+# v4 (and both otter runs) deliberately ran with --vision_lora_enable False
+# below. With it off, the frozen vision tower runs identically at every
+# tok_level -- the ONLY thing that changed across levels was the resampler's
+# output length -- and every backbone tested under that ablation showed a
+# flat 256-vs-16-token accuracy result. v5 flips this True to test whether
+# rank-nested vision LoRA is what was missing. Treat v4 vs v5 as a controlled
+# A/B on this one flag, not a bug fix.
 
 LLM_KEY=${1:-"qwen0.5b"}
 
@@ -122,7 +131,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --pos_embed_type learned \
     --use_nested_dropout False \
     --n_sample_students 1 \
-    --vision_lora_enable False \
+    --vision_lora_enable True \
     --lora_enable False \
     --lora_r 128 \
     --lora_alpha 128 \

@@ -83,7 +83,8 @@ class ElasticEngine:
                 vision_dim, cfg.num_query_tokens,
                 num_patches=num_patches,
                 use_pos_embed=cfg.use_pos_embed,
-                pos_embed_type=getattr(cfg, "pos_embed_type", "learned"))
+                pos_embed_type=getattr(cfg, "pos_embed_type", "learned"),
+                query_selection=getattr(cfg, "query_selection", "prefix"))
         # Projector stays full-width (no nesting): width is not an elasticity axis.
         self.projector = NestedProjector(vision_dim, llm_dim, widths=None,
                                          out_norm=getattr(cfg, "projector_out_norm", False))

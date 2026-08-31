@@ -19,6 +19,35 @@
 # Stage 1 freezes the LLM and ViT; only elastic_resampler, elastic_projector,
 # lora_A, lora_B are trained.  ZeRO-2 is sufficient since frozen params need
 # no gradient sharding.
+#
+# ── v5 (2026-08-31): vision_lora_enable turned on as the next ablation arm ──
+# v4 (and both otter runs) deliberately ran with --vision_lora_enable False,
+# ablating the ONLY mechanism that lets the vision tower adapt differently
+# per tok_level (llava/model/elastic/nested_lora.py) -- with it off, the
+# frozen CLIP tower runs identically at every level and only the resampler's
+# output length changes. Every backbone tested under that ablation
+# (tinyllama, phi2, smollm2) showed ~0 accuracy delta between 256 and 16
+# visual tokens. v5 flips this True to test whether rank-nested vision LoRA
+# is what was missing. Treat v4 vs v5 as a controlled A/B on this one flag.
+#
+# ── v5 follow-up (2026-08-31): --lora_ranks must end at Stage 2's max rank,
+# not Stage 1's rank ─────────────────────────────────────────────────────
+# NestedLoRALinear allocates lora_A/lora_B at max(lora_ranks) ONCE, at
+# construction (nested_lora.py) -- current_rank just slices a prefix of that
+# fixed buffer at runtime, it never resizes it. Stage 1 has one tok_level, so
+# --lora_ranks must have exactly one entry (train_elastic.py requires
+# len(lora_ranks) == len(tok_levels)) -- but that one entry sets the buffer
+# width for the WHOLE adapter, which Stage 2 then warm-starts from at its own
+# max rank (64, from --lora_ranks 8 16 32 64). Job 27267 was pretrained with
+# --lora_ranks 8 here (buffer width 8) and crashed at Stage-2 warm-start with
+# "size mismatch ... torch.Size([8, 1024]) ... current model is
+# torch.Size([64, 1024])" on every vision-tower LoRA key -- no training step
+# ever ran. Fixed: this must always be the SAME max rank as the finetune
+# script's --lora_ranks, i.e. 64 (the specific rank VALUE barely matters here
+# since Stage 1 only ever exercises tok_level index 0 -> lora_ranks[0]
+# regardless of what that value is; what matters is the buffer WIDTH matching
+# Stage 2's). If you ever change finetune_elastic_slm.sh's --lora_ranks max,
+# change this to match, or Stage 2 will fail at warm-start again.
 
 LLM_KEY=${1:-"qwen0.5b"}
 
@@ -98,9 +127,9 @@ echo "[FlexLLaVA] Output → ${OUTPUT_DIR}"
 
 deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --tok_levels 256 \
-    --lora_ranks 8 \
+    --lora_ranks 64 \
     --prefix_kl_weight 0.1 \
-    --vision_lora_enable False \
+    --vision_lora_enable True \
     --coral_weight 0.01 \
     --use_pos_embed True \
     --pos_embed_type learned \

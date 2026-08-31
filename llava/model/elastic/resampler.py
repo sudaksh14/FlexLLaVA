@@ -69,8 +69,14 @@ def _interp_pos_embed(pos: torch.Tensor, tgt_len: int) -> torch.Tensor:
 
 
 class NestedQueryResampler(nn.Module):
+    #: Valid `query_selection` modes. "prefix" is the only one used by any run
+    #: through v5 -- it is the exact original behaviour (queries[:n_tok]) and
+    #: is checked first in forward() so that path is untouched line-for-line.
+    QUERY_SELECTION_MODES = ("prefix", "magnitude", "attn_energy", "learned")
+
     def __init__(self, dim, num_queries, num_patches=576, n_heads=8, depth=2,
-                 use_pos_embed: bool = False, pos_embed_type: str = "learned"):
+                 use_pos_embed: bool = False, pos_embed_type: str = "learned",
+                 query_selection: str = "prefix"):
         """
         Args:
             dim:           hidden dim (must match ViT output dim, e.g. 1024 for CLIP-L)
@@ -93,12 +99,53 @@ class NestedQueryResampler(nn.Module):
                             is anchored to a grid position it cannot drift from, so
                             queries cannot collapse onto one another.  Registered as
                             buffers, so they never enter the optimizer.
+            query_selection: how the n_tok output tokens are chosen out of the
+                            num_queries-slot bank. DEFAULT "prefix" is the
+                            original, only-ever-run behaviour: a fixed,
+                            content-agnostic slice queries[:n_tok] (see forward()
+                            below -- that branch is byte-identical to the
+                            pre-2026-08-31 implementation). The other three are
+                            untested alternatives added to probe whether static
+                            positional slicing -- rather than actual visual
+                            content -- is why the token-budget axis has produced
+                            ~0 accuracy delta in every run so far:
+                              "magnitude"   -- run the FULL query bank, keep the
+                                  n_tok output tokens with the largest L2 norm.
+                                  Cheapest, no new params; norm is a weak proxy
+                                  for "useful to the LLM."
+                              "attn_energy" -- run the FULL query bank, keep the
+                                  n_tok tokens that pulled the most total
+                                  cross-attention mass from the patches on the
+                                  LAST layer. No new params; a self-contained
+                                  stand-in for CLIP's own CLS-attention saliency
+                                  (which would need new plumbing out of the
+                                  vision tower -- this does not).
+                              "learned"     -- a small linear head scores each
+                                  of the num_queries outputs; keep the top n_tok.
+                                  Hard top-k blocks gradient into the score
+                                  itself (argsort/topk is not differentiable),
+                                  so the selected outputs are rescaled by
+                                  sigmoid(score) to give the head SOME training
+                                  signal -- an approximation, not a rigorous
+                                  differentiable top-k (no Gumbel/straight-through
+                                  estimator here).
+                            All three non-default modes preserve the one property
+                            that actually matters for FLOP reduction -- only
+                            n_tok tokens ever reach the projector/LLM -- unlike
+                            zero-padding the projector's output width, which
+                            keeps every channel dense and saves nothing.
         """
         super().__init__()
+        if query_selection not in self.QUERY_SELECTION_MODES:
+            raise ValueError(f"query_selection={query_selection!r}; expected one "
+                             f"of {self.QUERY_SELECTION_MODES}")
         self.dim = dim
         self.num_queries = num_queries
         self.use_pos_embed = use_pos_embed
         self.pos_embed_type = pos_embed_type
+        self.query_selection = query_selection
+        if query_selection == "learned":
+            self.importance_head = nn.Linear(dim, 1)
 
         # Content queries — one learned vector per possible query slot.
         self.queries = nn.Parameter(torch.randn(num_queries, dim) * 0.02)
@@ -162,21 +209,81 @@ class NestedQueryResampler(nn.Module):
         n_tok = n_tok or self.num_queries
         assert n_tok <= self.num_queries
 
+        if self.query_selection == "prefix":
+            # ---- DEFAULT / the only path any run through v5 uses ----------
+            # Unchanged from the original implementation: a fixed slice of the
+            # query bank, one cross-attention pass, exactly n_tok tokens out.
+            if self.use_pos_embed:
+                kv = image_features + self.patch_pos_embed[:, :P, :]
+                q = (self.queries[:n_tok] + self.query_pos_embed[:n_tok])
+            else:
+                kv = image_features
+                q = self.queries[:n_tok]
+            q = q.unsqueeze(0).expand(N, -1, -1).contiguous()
+
+            for layer in self.layers:
+                qn = layer["ln_q"](q)
+                kvn = layer["ln_kv"](kv)
+                attn_out, _ = layer["cross_attn"](qn, kvn, kvn)
+                q = q + attn_out
+                q = q + layer["ff"](layer["ln_ff"](q))
+            return self.out_ln(q)
+
+        # ---- content-adaptive modes: run the FULL query bank, then keep the
+        # n_tok outputs an importance criterion ranks highest. Nested-by-
+        # construction as long as the ranking itself does not depend on n_tok
+        # (it doesn't -- the score is computed once, from the full-bank pass).
         if self.use_pos_embed:
             kv = image_features + self.patch_pos_embed[:, :P, :]
-            q = (self.queries[:n_tok] + self.query_pos_embed[:n_tok])
+            q = self.queries + self.query_pos_embed
         else:
             kv = image_features
-            q = self.queries[:n_tok]
+            q = self.queries
         q = q.unsqueeze(0).expand(N, -1, -1).contiguous()
 
+        need_weights = (self.query_selection == "attn_energy")
+        attn_weights = None
         for layer in self.layers:
             qn = layer["ln_q"](q)
             kvn = layer["ln_kv"](kv)
-            attn_out, _ = layer["cross_attn"](qn, kvn, kvn)
+            if need_weights:
+                # average_attn_weights=True averages over heads -> (N, Q, P).
+                # Overwritten each layer on purpose: only the LAST layer's
+                # weights reflect where the (already-updated) queries actually
+                # ended up attending, which is the more relevant saliency signal.
+                attn_out, attn_weights = layer["cross_attn"](
+                    qn, kvn, kvn, need_weights=True, average_attn_weights=True)
+            else:
+                attn_out, _ = layer["cross_attn"](qn, kvn, kvn)
             q = q + attn_out
             q = q + layer["ff"](layer["ln_ff"](q))
-        return self.out_ln(q)
+        full_out = self.out_ln(q)                     # (N, num_queries, dim)
+
+        if n_tok == self.num_queries:
+            return full_out
+
+        if self.query_selection == "magnitude":
+            score = full_out.norm(dim=-1)              # (N, Q) -- L2 norm per token
+        elif self.query_selection == "attn_energy":
+            score = attn_weights.sum(dim=-1)            # (N, Q) -- total attn mass pulled from patches
+        elif self.query_selection == "learned":
+            score = self.importance_head(full_out).squeeze(-1)   # (N, Q)
+        else:
+            raise ValueError(f"unreachable query_selection={self.query_selection!r}")
+
+        idx = score.topk(n_tok, dim=1).indices
+        idx, _ = idx.sort(dim=1)                        # keep bank order for interpretability
+        gathered = torch.gather(full_out, 1, idx.unsqueeze(-1).expand(-1, -1, full_out.shape[-1]))
+
+        if self.query_selection == "learned":
+            # Hard top-k is not differentiable w.r.t. WHICH indices were
+            # chosen, so this is the only gradient path into importance_head:
+            # scale the kept tokens by their own score. Approximate, not a
+            # rigorous differentiable top-k -- see the constructor docstring.
+            gate = torch.gather(score, 1, idx)
+            gathered = gathered * torch.sigmoid(gate).unsqueeze(-1)
+
+        return gathered
 
 
 class NestedProjector(nn.Module):

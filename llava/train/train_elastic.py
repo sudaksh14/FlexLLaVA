@@ -53,7 +53,7 @@ import os
 import sys
 
 import llava.train.train as m3train
-from llava.model.elastic import ElasticConfig
+from llava.model.elastic import ElasticConfig, NestedQueryResampler
 
 
 def _get_argv_value(key: str) -> str:
@@ -97,6 +97,8 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         )
     else:
         vt_lora_str = "disabled (frozen, unspecialized vision tower)"
+    qsel = elastic_args.query_selection
+    qsel_str = qsel if qsel == "prefix" else f"{qsel}  (NON-DEFAULT, untested)"
     sep = "=" * 64
     print(
         f"\n{sep}\n"
@@ -108,6 +110,7 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         f"  Training mode  : {mode}\n"
         f"  LLM LoRA       : {llm_lora_str}\n"
         f"  Vision LoRA    : {vt_lora_str}\n"
+        f"  Query select   : {qsel_str}\n"
         f"  KD loss        : {kd_str}\n"
         f"  CORAL loss     : {coral_str}\n"
         f"{sep}\n",
@@ -191,6 +194,16 @@ def _parse_elastic_args():
                         "a single shared adapter (max rank) is used for all levels "
                         "instead of one adapter per level. Ignored if "
                         "--vision_lora_enable is False.")
+    p.add_argument("--query_selection",
+                   choices=NestedQueryResampler.QUERY_SELECTION_MODES, default="prefix",
+                   help="How the resampler picks its n_tok output tokens (default "
+                        "'prefix': the original queries[:n_tok] slice, content-"
+                        "agnostic, used by every run through v5). 'magnitude' / "
+                        "'attn_energy' / 'learned' instead run the full query bank "
+                        "and keep the n_tok tokens an importance criterion ranks "
+                        "highest -- see NestedQueryResampler's docstring "
+                        "(llava/model/elastic/resampler.py) before using a "
+                        "non-default value.")
     elastic_args, remaining = p.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining  # hide elastic flags from HfArgumentParser
     return elastic_args
@@ -225,6 +238,7 @@ def main():
         teacher_model_path=elastic_args.teacher_model_path,
         use_pos_embed=elastic_args.use_pos_embed,
         pos_embed_type=elastic_args.pos_embed_type,
+        query_selection=elastic_args.query_selection,
         use_nested_dropout=elastic_args.use_nested_dropout,
         projector_out_norm=elastic_args.projector_out_norm,
         kl_teacher_tok_level=0,                 # largest tok level is teacher
