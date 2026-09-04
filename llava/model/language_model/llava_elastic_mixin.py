@@ -243,6 +243,14 @@ class LlavaElasticMixin:
             ext_teacher_logits = None
             _ext = getattr(engine, "kd_teacher", None)
             if _ext is not None and cfg.use_prefix_kl:
+                # The teacher is not a submodule (so ZeRO-2 leaves it alone), which
+                # also means nothing else ever moves it to the GPU. attach_kd_teacher
+                # tries, but the student is usually still on CPU at attach time, so
+                # this is the move that actually lands. No-op after the first step.
+                _tdev = next(_ext.parameters()).device
+                _sdev = input_ids.device if input_ids is not None else self.device
+                if _tdev != _sdev:
+                    _ext.to(device=_sdev)
                 with torch.no_grad():
                     _out = _ext(input_ids=input_ids, attention_mask=attention_mask,
                                 position_ids=position_ids, images=images,

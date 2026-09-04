@@ -50,6 +50,40 @@ def sincos_2d_pos_embed(dim: int, grid: int) -> torch.Tensor:
     return torch.cat(out, dim=1)                              # (grid*grid, dim)
 
 
+#: Anchor counts reachable by integer average-pooling of a square patch grid.
+#: For CLIP-L/14-336 (24x24 = 576 patches) these are the squares of 24's divisors.
+def valid_anchor_counts(num_patches: int) -> list:
+    side = int(round(num_patches ** 0.5))
+    if side * side != num_patches:
+        return []
+    return sorted((side // k) ** 2 for k in range(1, side + 1) if side % k == 0)
+
+
+def pool_anchors(image_features: torch.Tensor, n_anchor: int) -> torch.Tensor:
+    """Average-pool a square patch grid down to `n_anchor` grid-aligned tokens.
+
+    (N, P, C) -> (N, n_anchor, C). These are PARCEL's "spatial pool tokens":
+    deterministic, grid-aligned, carrying the low-frequency layout that learned
+    queries demonstrably fail to preserve on their own. Not learned, no
+    parameters -- the whole point is that this half of the budget cannot drift.
+    """
+    N, P, C = image_features.shape
+    side = int(round(P ** 0.5))
+    tgt = int(round(n_anchor ** 0.5))
+    if side * side != P or tgt * tgt != n_anchor:
+        raise ValueError(f"pool_anchors needs square grids, got P={P} n_anchor={n_anchor}")
+    if side % tgt != 0:
+        raise ValueError(
+            f"anchor grid {tgt}x{tgt} does not evenly divide the {side}x{side} patch "
+            f"grid; valid anchor counts are {valid_anchor_counts(P)}")
+    if tgt == side:
+        return image_features
+    k = side // tgt
+    x = image_features.view(N, side, side, C).permute(0, 3, 1, 2)   # (N, C, side, side)
+    x = F.avg_pool2d(x, kernel_size=k, stride=k)                    # (N, C, tgt, tgt)
+    return x.permute(0, 2, 3, 1).reshape(N, tgt * tgt, C)
+
+
 def _interp_pos_embed(pos: torch.Tensor, tgt_len: int) -> torch.Tensor:
     """Bicubic-resample a square positional grid to another square grid.
 
@@ -76,7 +110,8 @@ class NestedQueryResampler(nn.Module):
 
     def __init__(self, dim, num_queries, num_patches=576, n_heads=8, depth=2,
                  use_pos_embed: bool = False, pos_embed_type: str = "learned",
-                 query_selection: str = "prefix"):
+                 query_selection: str = "prefix",
+                 resampler_arch: str = "query", anchor_routing=None):
         """
         Args:
             dim:           hidden dim (must match ViT output dim, e.g. 1024 for CLIP-L)
@@ -147,6 +182,37 @@ class NestedQueryResampler(nn.Module):
         if query_selection == "learned":
             self.importance_head = nn.Linear(dim, 1)
 
+        # ---- PARCEL-style pooled-anchor branch (resampler_arch="pool_anchored")
+        self.resampler_arch = resampler_arch
+        self.num_patches = num_patches
+        self.anchor_routing = dict(anchor_routing) if anchor_routing else None
+        if resampler_arch not in ("query", "pool_anchored"):
+            raise ValueError(f"resampler_arch={resampler_arch!r}; expected "
+                             f"'query' or 'pool_anchored'")
+        if resampler_arch == "pool_anchored":
+            valid = valid_anchor_counts(num_patches)
+            if self.anchor_routing:
+                for b, npch in sorted(self.anchor_routing.items()):
+                    if npch not in valid:
+                        raise ValueError(
+                            f"anchor_routing[{b}]={npch} is not reachable by integer "
+                            f"pooling of a {num_patches}-patch grid; valid: {valid}")
+                    if npch > b:
+                        raise ValueError(
+                            f"anchor_routing[{b}]={npch} exceeds the budget {b}")
+            # Query <-> Pool self-attention: the step that makes queries "pool-aware"
+            # so they spend themselves on what pooling DISCARDS rather than
+            # re-encoding layout the anchors already carry. PARCEL's ablation:
+            # running this before the ViT cross-attention beats going straight to
+            # cross-attention (95.6 vs 95.2 retention @256 tokens).
+            self.pool_self_attn = nn.ModuleDict({
+                "attn": nn.MultiheadAttention(dim, n_heads, batch_first=True),
+                "ln_in": nn.LayerNorm(dim),
+                "ln_ff": nn.LayerNorm(dim),
+                "ff": nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(),
+                                    nn.Linear(dim * 4, dim)),
+            })
+
         # Content queries — one learned vector per possible query slot.
         self.queries = nn.Parameter(torch.randn(num_queries, dim) * 0.02)
 
@@ -197,6 +263,27 @@ class NestedQueryResampler(nn.Module):
         )
         self.out_ln = nn.LayerNorm(dim)
 
+    def n_anchors_for(self, budget: int, num_patches: int) -> int:
+        """How many of `budget` tokens are pooled spatial anchors.
+
+        Uses anchor_routing when the exact budget is declared. Otherwise falls
+        back to ~25% of the budget snapped DOWN to the nearest reachable grid --
+        needed because nested dropout hands us arbitrary budgets that no routing
+        table can enumerate. Always leaves at least one query token so the
+        pooled branch never degenerates into plain M3 average pooling.
+        """
+        valid = valid_anchor_counts(num_patches)
+        if self.anchor_routing and budget in self.anchor_routing:
+            n_p = self.anchor_routing[budget]
+        else:
+            target = max(1, budget // 4)
+            n_p = max((v for v in valid if v <= target), default=1)
+        # Never consume the whole budget: keep >=1 query so the "division of
+        # labour" this architecture exists for actually happens.
+        while n_p >= budget and n_p > 1:
+            n_p = max((v for v in valid if v < n_p), default=1)
+        return min(n_p, max(budget - 1, 1))
+
     def forward(self, image_features: torch.Tensor, n_tok: int = None) -> torch.Tensor:
         """
         Args:
@@ -207,6 +294,10 @@ class NestedQueryResampler(nn.Module):
         """
         N, P, _ = image_features.shape
         n_tok = n_tok or self.num_queries
+
+        if self.resampler_arch == "pool_anchored":
+            return self._forward_pool_anchored(image_features, n_tok)
+
         assert n_tok <= self.num_queries
 
         if self.query_selection == "prefix":
@@ -284,6 +375,65 @@ class NestedQueryResampler(nn.Module):
             gathered = gathered * torch.sigmoid(gate).unsqueeze(-1)
 
         return gathered
+
+    # ------------------------------------------------------------------
+    def _forward_pool_anchored(self, image_features: torch.Tensor,
+                               n_tok: int) -> torch.Tensor:
+        """PARCEL-style Pool-Conditioned Query Resampling.
+
+        budget B  ->  N_p pooled spatial anchors  +  N_q learned queries
+
+          1. anchors = avg_pool(patches)                 low-frequency layout,
+                                                          deterministic, no params
+          2. [anchors; queries] -> self-attention        queries become pool-aware
+          3. Q_PA -> cross-attend(raw patches)           queries fetch the detail
+                                                          pooling threw away
+          4. output = [anchors'; Q_SE]                   exactly B tokens
+
+        The anchors emitted are the post-self-attention ones: the block updates
+        both streams, and letting the anchors see the queries costs nothing while
+        keeping them contextualised. Their *spatial* content is still pinned by
+        construction, which is the property queries alone could not hold.
+        """
+        N, P, _ = image_features.shape
+        n_p = self.n_anchors_for(n_tok, P)
+        n_q = n_tok - n_p
+        if n_q > self.num_queries:
+            raise ValueError(
+                f"budget {n_tok} needs {n_q} query tokens but the bank holds "
+                f"{self.num_queries}; raise num_query_tokens (= tok_levels[0])")
+
+        anchors = pool_anchors(image_features, n_p)          # (N, n_p, C)
+
+        if n_q <= 0:                                          # pure-anchor budget
+            return self.out_ln(anchors)
+
+        if self.use_pos_embed:
+            kv = image_features + self.patch_pos_embed[:, :P, :]
+            q = self.queries[:n_q] + self.query_pos_embed[:n_q]
+        else:
+            kv = image_features
+            q = self.queries[:n_q]
+        q = q.unsqueeze(0).expand(N, -1, -1).contiguous()
+
+        # ---- 2. Query <-> Pool self-attention -------------------------------
+        joint = torch.cat([anchors, q], dim=1)                # (N, n_p + n_q, C)
+        jn = self.pool_self_attn["ln_in"](joint)
+        attn_out, _ = self.pool_self_attn["attn"](jn, jn, jn)
+        joint = joint + attn_out
+        joint = joint + self.pool_self_attn["ff"](self.pool_self_attn["ln_ff"](joint))
+        anchors_out, q = joint[:, :n_p], joint[:, n_p:]
+
+        # ---- 3. Semantic-explorer cross-attention (existing stack) ----------
+        for layer in self.layers:
+            qn = layer["ln_q"](q)
+            kvn = layer["ln_kv"](kv)
+            attn_out, _ = layer["cross_attn"](qn, kvn, kvn)
+            q = q + attn_out
+            q = q + layer["ff"](layer["ln_ff"](q))
+
+        out = torch.cat([anchors_out, q], dim=1)              # (N, n_tok, C)
+        return self.out_ln(out)
 
 
 class NestedProjector(nn.Module):

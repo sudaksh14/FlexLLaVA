@@ -125,9 +125,20 @@ echo "[FlexLLaVA] num_gpus=${NUM_GPUS}  grad_accum=${GRAD_ACCUM}  (effective bat
 echo "[FlexLLaVA] Pretrain  LLM=${MODEL_PATH}  conv=${CONV_VERSION}"
 echo "[FlexLLaVA] Output → ${OUTPUT_DIR}"
 
+# Overridable for experiments with a different token/rank grid -- e.g. the
+# extended-range experiment (16..576 tokens): match STAGE1_LORA_RANK to
+# whatever finetune_elastic_slm.sh's LORA_RANKS ends at, and STAGE1_TOK_LEVEL
+# to its first (largest) entry, or Stage 2's warm-start crashes exactly like
+# job 27267 did -- see the v5 follow-up comment above.
+STAGE1_TOK_LEVEL="${STAGE1_TOK_LEVEL:-256}"
+STAGE1_LORA_RANK="${STAGE1_LORA_RANK:-64}"
+echo "[FlexLLaVA] tok_level=${STAGE1_TOK_LEVEL}  lora_rank=${STAGE1_LORA_RANK}  (must match finetune's largest tok_level / max lora_rank)"
+
 deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
-    --tok_levels 256 \
-    --lora_ranks 64 \
+    --tok_levels ${STAGE1_TOK_LEVEL} \
+    --lora_ranks ${STAGE1_LORA_RANK} \
+    --resampler_arch "${RESAMPLER_ARCH:-query}" \
+    --anchor_routing "${ANCHOR_ROUTING:-}" \
     --prefix_kl_weight 0.1 \
     --vision_lora_enable True \
     --coral_weight 0.01 \

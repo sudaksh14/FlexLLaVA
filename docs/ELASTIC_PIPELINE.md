@@ -192,8 +192,8 @@ regardless of encoder capacity.
 | otter2 | off | off | same Otter pipeline, grad-accum fixed | valid run; Stage 1 close to v4 (2.34 vs 2.26); Stage 2 lost to v4 on 3/5 benchmarks (pope, textvqa, gqa) with no unexplained config diff — leading suspect is `--otter_source_grouped_batches True` changing optimization dynamics. **Otter pipeline retired** — code stays (parallel, untouched), not used for further runs. |
 | v5 | **on** | off | original llava mixture | first vision-LoRA test. First attempt (job 27267) crashed at Stage-2 warm-start — see §10. Fixed and relaunched (job 27275 tinyllama, 27277 smollm2); in progress. |
 
-Full narrative and every measured number lives in this session's memory files (not
-git-tracked); this table is the durable summary. The otter pipeline itself
+Full narrative, decision log, and the forward plan live in
+[EXPERIMENT_JOURNAL.md](EXPERIMENT_JOURNAL.md); this table is the quick summary. The otter pipeline itself
 (`llava/data_otter/`, `train_otter.py`, `otter_trainer.py`, `configs/otter/`) is
 still present and functional — it was a legitimate, verified build, just not the
 direction being pursued now.

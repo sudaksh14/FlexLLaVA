@@ -71,6 +71,27 @@ class ElasticConfig:
     # "sincos2d" -> frozen 2-D sine-cosine grid shared by queries and patches,
     #               the MQT-LLaVA design (buffers, never in the optimizer)
     pos_embed_type: str = "learned"
+    # Resampler architecture.
+    #   "query"        -- the original: a pure learned query bank cross-attending
+    #                     to patches. Every run through v7 used this.
+    #   "pool_anchored" -- PARCEL-style (arXiv 2605.30126) division of labour:
+    #                     part of the budget is a deterministic average-pooled
+    #                     spatial grid carrying low-frequency layout, the rest is
+    #                     learned queries that are first made "pool-aware" via
+    #                     self-attention with the anchors, then cross-attend to
+    #                     the raw patches for the complementary detail. Motivated
+    #                     by PARCEL's finding that query-only compression
+    #                     "forces the queries to encode both the low-frequency
+    #                     layout and fine-grained semantic details without an
+    #                     underlying spatial anchor" -- our exact failure mode.
+    resampler_arch: str = "query"
+    # budget -> number of pooled anchor tokens, for resampler_arch="pool_anchored".
+    # Must be a perfect square that divides the patch grid evenly (for a 24x24
+    # CLIP-L/14-336 grid: 1, 4, 9, 16, 36, 64, 144, 576). None -> derive ~25% of
+    # the budget, snapped down to the nearest valid grid. Anchor count MUST be
+    # monotone in budget: PARCEL's ablation shows a fixed anchor resolution
+    # across budgets costs ~5 points at the top of the range.
+    anchor_routing: Optional[dict] = None
     # How the resampler picks its n_tok output tokens out of the query bank.
     # DEFAULT "prefix": the original, only-ever-run behaviour (queries[:n_tok],
     # content-agnostic). See NestedQueryResampler's docstring (resampler.py)

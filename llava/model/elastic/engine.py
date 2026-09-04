@@ -68,6 +68,18 @@ def attach_kd_teacher(engine, cfg, student):
     teacher.config.matryoshka_vis_token_scale = None
     teacher.requires_grad_(False)
     teacher.eval()
+    # Best-effort device placement. from_pretrained lands on CPU, and because the
+    # teacher is deliberately NOT a submodule (so ZeRO-2 never shards it), no
+    # later .to() from Trainer/DeepSpeed reaches it either -- job 27298 hit
+    # "Expected all tensors to be on the same device, cpu and cuda:0". The
+    # student may itself still be on CPU at attach time, so the mixin re-checks
+    # and moves it on the first teacher forward; this is just the cheap path.
+    try:
+        dev = next(student.parameters()).device
+        if dev.type == "cuda":
+            teacher.to(device=dev)
+    except StopIteration:
+        pass
     engine.kd_teacher = teacher
     return teacher
 
@@ -84,7 +96,9 @@ class ElasticEngine:
                 num_patches=num_patches,
                 use_pos_embed=cfg.use_pos_embed,
                 pos_embed_type=getattr(cfg, "pos_embed_type", "learned"),
-                query_selection=getattr(cfg, "query_selection", "prefix"))
+                query_selection=getattr(cfg, "query_selection", "prefix"),
+                resampler_arch=getattr(cfg, "resampler_arch", "query"),
+                anchor_routing=getattr(cfg, "anchor_routing", None))
         # Projector stays full-width (no nesting): width is not an elasticity axis.
         self.projector = NestedProjector(vision_dim, llm_dim, widths=None,
                                          out_norm=getattr(cfg, "projector_out_norm", False))

@@ -120,11 +120,28 @@ echo "[FlexLLaVA] num_gpus=${NUM_GPUS}  grad_accum=${GRAD_ACCUM}  (effective bat
 echo "[FlexLLaVA] Finetune  LLM=${MODEL_PATH}  conv=${CONV_VERSION}"
 echo "[FlexLLaVA] Pretrain checkpoint → ${PRETRAIN_CKPT}"
 echo "[FlexLLaVA] Output             → ${OUTPUT_DIR}"
+echo "[FlexLLaVA] tok_levels=${TOK_LEVELS:-256 144 64 16}  lora_ranks=${LORA_RANKS:-8 16 32 64}  (override via TOK_LEVELS/LORA_RANKS env vars; keep pretrain_elastic_slm.sh's STAGE1_TOK_LEVEL/STAGE1_LORA_RANK matching this list's first/last entry)"
+# KD teacher. 'self' (default) distills the model at tok_levels[0] into its own
+# smaller levels -- measured KL ~0.004, i.e. contributes ~0.01% of the loss,
+# because teacher and student are the same weights on informationally
+# equivalent inputs. TEACHER=llava loads a frozen LLaVA-1.5-7B instead, which
+# makes EVERY level a student (including tok_levels[0]) and gives the KL real
+# signal -- at the cost of ~14 GB/GPU for the replicated frozen 7B (it is a
+# plain attribute on ElasticEngine, not a submodule, so ZeRO-2 does NOT shard
+# it). A40-only; it does not fit alongside training on a 23 GB A10.
+# REQUIRES a vocab match: attach_kd_teacher raises if teacher and student
+# vocab sizes differ, so this only works for Llama-32000 backbones
+# (tinyllama, mobilellama), NOT smollm2/qwen/phi.
+echo "[FlexLLaVA] teacher=${TEACHER:-self}  prefix_kl_weight=${PREFIX_KL_WEIGHT:-0.1}  (TEACHER=llava for the frozen 7B; Llama-vocab backbones only)"
 
 deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
-    --tok_levels 256 144 64 16 \
-    --lora_ranks 8 16 32 64 \
-    --prefix_kl_weight 0.1 \
+    --tok_levels ${TOK_LEVELS:-256 144 64 16} \
+    --lora_ranks ${LORA_RANKS:-8 16 32 64} \
+    --resampler_arch "${RESAMPLER_ARCH:-query}" \
+    --anchor_routing "${ANCHOR_ROUTING:-}" \
+    --teacher "${TEACHER:-self}" \
+    --teacher_model_path "${TEACHER_MODEL_PATH:-liuhaotian/llava-v1.5-7b}" \
+    --prefix_kl_weight "${PREFIX_KL_WEIGHT:-0.1}" \
     --coral_weight 0.1 \
     --use_coral False \
     --use_pos_embed True \

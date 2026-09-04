@@ -125,6 +125,22 @@ _DEFAULT_KL_WEIGHT       = 1.0
 _DEFAULT_CORAL_WEIGHT    = 0.01
 
 
+def _parse_anchor_routing(spec):
+    """'256:64,144:36' -> {256: 64, 144: 36}. None/empty -> None (auto-derive)."""
+    if not spec:
+        return None
+    routing = {}
+    for pair in spec.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        budget, _, n_anchor = pair.partition(":")
+        if not n_anchor:
+            raise ValueError(f"--anchor_routing entry {pair!r} is not 'BUDGET:NANCHOR'")
+        routing[int(budget)] = int(n_anchor)
+    return routing or None
+
+
 def _parse_elastic_args():
     """Pre-parse only the elastic-specific flags, leaving everything else in
     sys.argv for HfArgumentParser inside m3train.train()."""
@@ -204,6 +220,18 @@ def _parse_elastic_args():
                         "highest -- see NestedQueryResampler's docstring "
                         "(llava/model/elastic/resampler.py) before using a "
                         "non-default value.")
+    p.add_argument("--resampler_arch", choices=("query", "pool_anchored"), default="query",
+                   help="'query' (default) = the original learned query bank alone. "
+                        "'pool_anchored' = PARCEL-style: part of each budget is a "
+                        "deterministic average-pooled spatial grid, the rest are "
+                        "queries made pool-aware by self-attention before they "
+                        "cross-attend to the patches. See docs/EXPERIMENT_JOURNAL.md.")
+    p.add_argument("--anchor_routing", type=str, default=None, metavar="B:NP,...",
+                   help="Anchor counts per budget for --resampler_arch pool_anchored, "
+                        "e.g. '256:64,144:36,64:16,16:4'. Each NP must be a perfect "
+                        "square reachable by integer pooling of the patch grid, and "
+                        "must be monotone in budget. Omit to derive ~25%% of each "
+                        "budget automatically.")
     elastic_args, remaining = p.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining  # hide elastic flags from HfArgumentParser
     return elastic_args
@@ -239,6 +267,8 @@ def main():
         use_pos_embed=elastic_args.use_pos_embed,
         pos_embed_type=elastic_args.pos_embed_type,
         query_selection=elastic_args.query_selection,
+        resampler_arch=elastic_args.resampler_arch,
+        anchor_routing=_parse_anchor_routing(elastic_args.anchor_routing),
         use_nested_dropout=elastic_args.use_nested_dropout,
         projector_out_norm=elastic_args.projector_out_norm,
         kl_teacher_tok_level=0,                 # largest tok level is teacher

@@ -13,12 +13,33 @@
 #
 # Submit all 4 levels:  sbatch eval_lmms_level.sh [model_path]
 # Submit one level:     sbatch --array=2 eval_lmms_level.sh [model_path]
+# Checkpoint with a different grid size (e.g. an 8-level experiment):
+#   sbatch --array=0-7 eval_lmms_level.sh [model_path]
+# Labels are read from the checkpoint's own elastic_config.json, so any grid
+# size works as long as --array matches its length.
 
 MODEL_PATH=${1:-/var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain}
 LEVEL=$SLURM_ARRAY_TASK_ID
 
-TOK_LABELS=("256tok" "144tok" "64tok" "16tok")
+# Read tok_levels from the checkpoint's own elastic_config.json rather than
+# hardcoding 4 -- a checkpoint trained with a different grid (e.g. the
+# extended 8-level range experiment) needs a matching label list, and
+# --array must be overridden to match too: sbatch --array=0-7 eval_lmms_level.sh <ckpt>
+if [ -f "${MODEL_PATH}/elastic_config.json" ] && command -v jq >/dev/null; then
+    mapfile -t TOK_LEVELS_JSON < <(jq -r '.tok_levels[]' "${MODEL_PATH}/elastic_config.json")
+    TOK_LABELS=()
+    for t in "${TOK_LEVELS_JSON[@]}"; do TOK_LABELS+=("${t}tok"); done
+else
+    echo "WARNING: ${MODEL_PATH}/elastic_config.json not found or jq missing;" \
+         "falling back to the default 4-level label list."
+    TOK_LABELS=("256tok" "144tok" "64tok" "16tok")
+fi
 LABEL=${TOK_LABELS[$LEVEL]}
+if [ -z "$LABEL" ]; then
+    echo "ERROR: no tok_levels entry at index $LEVEL (checkpoint has ${#TOK_LABELS[@]} levels)." \
+         "Check --array matches the checkpoint's actual grid size." >&2
+    exit 1
+fi
 # Namespace by model: without this, two different checkpoints evaluated at
 # the same tok_level land in the same directory, and the summary script's
 # glob (which only filters by tok_level + benchmark) silently mixes results

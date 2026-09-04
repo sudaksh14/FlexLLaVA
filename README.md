@@ -201,8 +201,9 @@ anything under `llava/model/elastic/`.
 
 ## Experiment log
 
-Summary only — see [docs/ELASTIC_PIPELINE.md §9](docs/ELASTIC_PIPELINE.md#9-experiment-history)
-for the full table and every measured number.
+Full narrative — decisions, results, bugs, and the current forward plan — is in
+**[docs/EXPERIMENT_JOURNAL.md](docs/EXPERIMENT_JOURNAL.md)**. Mechanism-level detail is
+in [docs/ELASTIC_PIPELINE.md §9](docs/ELASTIC_PIPELINE.md#9-experiment-history). Summary:
 
 - **v4**: reference baseline. Vision-tower LoRA and nested dropout both off. Every
   backbone tested (TinyLlama, Phi-2, SmolLM2) shows ~0 accuracy delta between 256
