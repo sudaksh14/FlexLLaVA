@@ -1,0 +1,6 @@
+model,status,vision_params_m,llm_params_m,vision_gflops,llm_gflops,full_gflops,vision_latency_ms,llm_latency_ms,full_latency_ms,vision_share_params,vision_share_flops,vision_share_latency,note
+llava_v1_5_7b,ok,303.5,6759.4,381.9,8543.3,8925.2,48.63,175.02,223.65,0.0430,0.0428,0.2174,"CLIP-L/14-336 + Vicuna-7B, 576 tok"
+flexllava_tinyllama_v4,ok,303.5,1139.0,381.9,676.5,1058.4,15.43,36.09,51.51,0.2104,0.3608,0.2995,"CLIP-L/14-336 + TinyLlama-1.1B (nested LoRA), 256 tok"
+tinyllava_phi2,ok,428.2,2789.2,670.3,93.3,763.7,72.51,37.12,109.63,0.1331,0.8778,0.6614,"SigLIP-so400m/384 (729 tok, connector=mlp2x_gelu, no downsampling) + Phi-2-2.7B -- LLM GFLOPs implausibly low given MORE tokens than CLIP (729>576); likely FlopCounterMode undercounting Phi-2's attention op (fused/SDPA path not traced the same as FlexLLaVA/LLaVA-7B's eager attention), NOT a real architectural fact. See journal note before citing this row's FLOPs split."
+mobilevlm_v2,ok,303.5,1370.6,381.9,422.5,804.5,18.20,41.85,60.05,0.1813,0.4748,0.3030,"CLIP-L/14-336 + MobileLLaMA-1.4B (LDPv2 connector), 576 tok"
+smolvlm,ok,413.0,1833.3,5998.0,3029.6,9027.7,267.56,75.36,342.92,0.1839,0.6644,0.7802,"SigLIP-so400m + SmolLM2-1.7B, SmolVLM's own dynamic image tiling (default settings) -- multiplies vision cost by tile count, not comparable 1:1 to the single-crop models above"

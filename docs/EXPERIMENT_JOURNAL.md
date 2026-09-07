@@ -37,6 +37,8 @@ Every decision below is the user's; the "result" column is what actually happene
 | 12 | Read the three adjacent papers and report what's adaptable. | PARCEL is the actionable one (§6, §7). |
 | 13 | Create an experiment with a 7B LLaVA teacher; use node205. | **v7-kd7b** queued on node205 behind v6-tokrange (§5b). The smoke test caught a latent bug: the frozen teacher was never moved to GPU (§4). |
 | 14 | Execute the v8 PARCEL plan; queue it on node208. | **v8-parcel** launched (job 27303, eval 27304). Unit tests + end-to-end smoke both pass. Two deliberate deviations from the plan below — see §8-note. |
+| 15 | Build a paper motivation section: (a) peak-memory comparison, LLaVA-7B vs FlexLLaVA vs original TinyLLaVA/MobileVLM/SmolVLM, on node207; (b) vision-vs-LLM params/FLOPs/latency split for FlexLLaVA-TinyLlama. | Both measured (§9). Found and fixed a real inference-path gap along the way: bare `forward()` calls silently drop `matryoshka_vis_token_scale` outside training/`generate()`. MobileVLM/SmolVLM initially left unmeasured — package-version conflicts in the shared training env, not fixed in place to avoid risking the 4 jobs running in it. |
+| 16 | Extend the vision-vs-LLM split (decision 15b) to LLaVA-7B, TinyLLaVA-Phi2, MobileVLM, SmolVLM too, not just FlexLLaVA. | All 5 measured (§9c), via a new isolated `flexllava-refs` conda env for MobileVLM/SmolVLM — zero changes to the shared `matryoshka-mm` env the 4 training jobs depend on. One number (TinyLLaVA-Phi2's LLM FLOPs) flagged as likely unreliable rather than reported at face value — see §9c. |
 
 ## 2. The Otter arc (decisions 1–4)
 
@@ -124,6 +126,7 @@ All mine, all found before or shortly after they cost real compute:
 | `run_job_slm.sh` has no `set -e` | crashed stage still exits 0 → `afterok` eval fires on a nonexistent checkpoint | documented; always verify the checkpoint dir exists |
 | `eval_lmms_level.sh` hardcoded 4-entry `TOK_LABELS` | would silently produce empty labels for an 8-level checkpoint | read `tok_levels` from the checkpoint's `elastic_config.json` |
 | **External KD teacher never moved to GPU** — `attach_kd_teacher` calls `from_pretrained` (lands on CPU) and, because the teacher is deliberately not a submodule so ZeRO-2 won't shard it, nothing else moves it either | every `--teacher llava` run would die at step 1 with `Expected all tensors to be on the same device`; latent since the path had never been run | best-effort `.to(device)` at attach + authoritative check-and-move in the mixin before the first teacher forward (the student is usually still on CPU at attach time) |
+| **Bare `forward()` silently drops `matryoshka_vis_token_scale` outside training/`generate()`** (`llava_elastic_mixin.py`'s "Standard eval / non-matryoshka forward" branch, reached whenever `self.training` is False and you call the model directly) — it calls `prepare_inputs_labels_for_multimodal` with no scale at all, so token reduction never runs and raw 1024-dim CLIP features get concatenated straight into 2048-dim LLM embeddings | not a training-path bug — `.generate()` (what the eval harness actually uses) and the training grid loop both handle it correctly. Bit two ad-hoc memory/latency probe scripts written this session that called `model(...)` directly instead | probes fixed to go through `.generate()` or to call `prepare_inputs_labels_for_multimodal` directly, matching what the supported paths already do. Documented here as a footgun for future direct-`forward()` scripts against elastic checkpoints, not something changed in the mixin itself. |
 
 ## 5. What's running now (2026-09-04)
 
@@ -367,3 +370,144 @@ extend high enough?) and finishes in ~2 days. Its result changes what v8 should 
 if v6 shows a real gap opening up at 384–576, the resampler is fine and the ladder was
 just too short; if v6 is flat too — the likely outcome given everything else — then
 PARCEL's diagnosis is the best remaining explanation and v8 should start immediately.
+
+## 9. Paper motivation section: deployment memory + vision/LLM cost split (decision 15)
+
+Two questions for a paper's motivation section, measured empirically on node207 (A10,
+1 GPU) rather than by analytic roofline — scripts: `debug/measure_peak_memory.py`,
+`debug/measure_vision_llm_split.py`. Each model in the memory comparison loads in its
+own subprocess so a crash or version conflict in one third-party repo can't take out
+the others. Raw data: `docs/peak_memory_comparison.csv`, `docs/vision_vs_llm_split.csv`.
+
+### 9a. Why small backbones matter for on-device deployment
+
+Peak memory of one forward pass (real image, short prompt), via `generate()` /
+`prepare_inputs_labels_for_multimodal` directly — **not** a bare `forward()` call, see
+the bugs table (§4) for why that distinction mattered here.
+
+| model | family | params (B) | peak mem (GB) | tokens |
+|---|---|---:|---:|---|
+| LLaVA-1.5 | baseline | 7.06 | **14.87** | 576 (no elastic engine) |
+| TinyLLaVA-Phi-2-SigLIP | original | 3.22 | **13.02** | 576 (SigLIP-so400m) |
+| SmolVLM-Instruct | original | — | not measured | env gap, see below |
+| MobileVLM_V2-1.7B | original | — | not measured | env gap, see below |
+| FlexLLaVA-SmolLM2 (v4) | ours | 2.05 | 4.16 / 4.27 | 16 / 256 |
+| FlexLLaVA-TinyLlama (v4/v6) | ours | 1.44–1.47 | **2.94 / 2.97 / 3.10** | 16 / 256 / 576 |
+
+**Headline**: FlexLLaVA-TinyLlama is ~5x lighter than LLaVA-7B (2.97 GB vs 14.87 GB) —
+comfortably inside an 8 GB Jetson Orin Nano with room to spare, where the 7B alone
+consumes nearly the whole board.
+
+**Sharper point, from TinyLLaVA-Phi-2**: a "small" VLM label doesn't guarantee a small
+footprint — TinyLLaVA-Phi-2 measures 13.0 GB, almost as heavy as the 7B, because Phi-2
+(2.7B) + SigLIP-so400m is still a substantial stack. FlexLLaVA-TinyLlama is ~4.3x
+lighter than TinyLLaVA-Phi-2 specifically because 1.1B is a smaller commitment than
+2.7B — **backbone size is what determines footprint, not the "VLM" label.**
+
+**Token-count sensitivity** (the question that prompted extending this table to 576
+tokens): 16→256 tokens costs ~0.9% more memory; 256→576 costs ~4.5% (≈5.4% total across
+a 36x token-count range). Real, but small next to the backbone-size effect above — for
+both TinyLlama and SmolLM2. This is itself a finding worth stating directly: **memory
+is dominated by backbone size, not visual-token count**, which is *why* the token-budget
+axis's real payoff has to be latency/FLOPs (§9b), not memory.
+
+**Not measured**: MobileVLM_V2-1.7B (`ModuleNotFoundError: No module named
+'timm.layers'`) and SmolVLM-Instruct (unrecognized processor class) both fail on
+package-version mismatches in the shared `matryoshka-mm` training env. Deliberately not
+fixed in place — four training jobs (27282/27291/27303/27299) were running in that same
+env at measurement time, and a version bump to satisfy one comparison-table cell risked
+destabilizing multi-day runs. Left as a documented gap in the CSV, not silently dropped;
+fix in an isolated venv if these numbers are needed for the paper.
+
+### 9b. Vision vs LLM: params, FLOPs, latency — FlexLLaVA-TinyLlama @256 tokens
+
+FLOPs reuse the same `ElasticAnalyzer` / `vision_tower_gflops()` cost model the eval
+harness already reports numbers from (`llava/eval/efficiency/`). Latency is real,
+CUDA-synchronized wall-clock (median of 20, 3-call warmup discarded) on node207 — the
+codebase's own `NOTICE.md` is explicit that the analytic roofline is not meant to be
+read as wall-clock, so this deliberately isn't that.
+
+| component | params (M) | GFLOPs | latency (ms) |
+|---|---:|---:|---:|
+| vision tower (CLIP-L/14-336) | 303.5 | 162.0 | 13.51 |
+| resampler + projector | 32.6 | — | (in full timing) |
+| LLM (TinyLlama, 256 tok) | 1106.3 | 508.4 | 18.23 |
+| **full forward** | 1442.5 | 670.4 | 32.93 |
+
+**Vision share: 21.5% params, 24.2% FLOPs, 42.6% latency.**
+
+**Honest reading, not the one the question implied**: the LLM dominates, but not
+overwhelmingly — roughly 3/4 of params and FLOPs, not 90%+. Vision's latency share
+(42.6%) is notably larger than its FLOPs share (24.2%), meaning CLIP's forward is less
+latency-efficient per FLOP than TinyLlama's at this scale (lower arithmetic intensity,
+less kernel-level optimization, or both — not investigated further here). So "we only
+optimize the LLM because vision is negligible" is not a defensible claim from these
+numbers; vision is a meaningful fraction of the cost.
+
+**The actually-correct justification, and a stronger one**: the vision tower's cost is
+a *fixed constant regardless of token budget* — CLIP always runs its full 576-patch
+forward no matter what `tok_level` is requested; nested LoRA changes *what* it computes,
+not *how much*. The LLM's cost, by contrast, scales directly with visual-token count.
+**Elasticity can only buy anything on the side where cost actually varies with the
+budget — the LLM, by construction — not because the vision tower is small.** This row's
+numbers would be identical at every tok_level; only the LLM row would change if
+re-measured at 16 tokens. That's the sentence for the paper, not a magnitude argument.
+
+### 9c. The same split across all 5 models (decision 16)
+
+§9b's single-model numbers used the Llama-specific analytic roofline for LLM FLOPs,
+which does not generalize to Phi-2 (TinyLLaVA's LLM has a parallel attention+MLP
+block, not Llama's serial one). Redone with `debug/measure_vision_llm_split_multi.py`:
+FLOPs via `torch.utils.flop_counter.FlopCounterMode` (real traced ops, architecture-
+agnostic), vision measured directly, LLM+connector = full − vision for both FLOPs and
+latency (params use the same subtraction). This supersedes §9b's FlexLLaVA-TinyLlama
+row — same checkpoint, consistent method now, different numbers from the mix of
+methods used before. LLaVA-7B and TinyLLaVA-Phi2 ran in `matryoshka-mm`; MobileVLM_V2
+and SmolVLM needed a fresh, fully isolated `flexllava-refs` conda env — the shared
+training env's timm/transformers were too old for either, and four training jobs were
+running in it at the time, so it was never touched. Two dependency snags along the way,
+both fixed: a missing `requests` import, and an unpinned `pip install` first resolving
+to `torch 2.14.0+cu130` / `transformers 5.16.1` (a version whose API had moved past
+`AutoModelForVision2Seq`) — pinned to `transformers==4.49.0` instead.
+
+| model | vision params (M) | LLM params (M) | vision GFLOPs | LLM GFLOPs | vision lat (ms) | LLM lat (ms) | vision share: params / FLOPs / latency |
+|---|---:|---:|---:|---:|---:|---:|---|
+| LLaVA-1.5-7B | 303.5 | 6759.4 | 381.9 | 8543.3 | 48.6 | 175.0 | 4.3% / 4.3% / 21.7% |
+| FlexLLaVA-TinyLlama (v4, 256 tok) | 303.5 | 1139.0 | 381.9 | 676.5 | 15.4 | 36.1 | 21.0% / 36.1% / 30.0% |
+| MobileVLM_V2-1.7B | 303.5 | 1370.6 | 381.9 | 422.5 | 18.2 | 41.9 | 18.1% / 47.5% / 30.3% |
+| TinyLLaVA-Phi-2-SigLIP | 428.2 | 2789.2 | 670.3 | **93.3** ⚠ | 72.5 | 37.1 | 13.3% / **87.8%** ⚠ / 66.1% |
+| SmolVLM-Instruct | 413.0 | 1833.3 | 5998.0 | 3029.6 | 267.6 | 75.4 | 18.4% / 66.4% / 78.0% |
+
+**⚠ TinyLLaVA-Phi2's LLM-FLOPs figure is flagged, not trusted.** SigLIP-so400m/384
+with `connector_type=mlp2x_gelu` (no downsampling) produces **729 visual tokens —
+more than CLIP's 576**, so if anything Phi-2 should see *higher* per-forward LLM FLOPs
+than TinyLlama/Vicuna in the other rows, not 93.3 GFLOPs (an order of magnitude below
+FlexLLaVA-TinyLlama's 676.5 GFLOPs on a *shorter*, 256-token sequence). Likely cause:
+`FlopCounterMode` undercounting Phi-2's attention op if `transformers` routes it
+through a fused/SDPA kernel that isn't traced the same way FlexLLaVA/LLaVA-7B's eager
+attention is — not verified further. Its params and latency numbers came from direct
+measurement (not subtraction) and are not suspect the same way; only the FLOPs split
+for this one row should be treated as unreliable.
+
+**Cross-model reading**:
+- **Same vision tower, shrinking share as the LLM grows.** LLaVA-7B and
+  FlexLLaVA-TinyLlama share byte-identical CLIP-L/14-336 numbers (303.5M params, 381.9
+  GFLOPs) — confirms the measurement method is consistent — yet vision's *share*
+  falls from 21.0%/36.1%/30.0% (params/FLOPs/latency) at 1.1B down to 4.3%/4.3%/21.7%
+  at 7B. **The "vision isn't negligible" caveat from §9b is specifically an SLM-scale
+  phenomenon.** At 7B, ignoring vision costs is far more defensible than at 1.1B,
+  where it's already ~30–36% of the cost. This sharpens, not weakens, the case for why
+  FlexLLaVA's SLM focus needs the elastic-token argument (§9b's actual justification —
+  cost varies with budget on the LLM side only) rather than a "vision is small" claim.
+- **MobileVLM_V2 is the cleanest reference point for what "SLM-scale, single-crop,
+  simple connector" should look like** — its vision tower is the exact same CLIP-L/336
+  as ours, its LLM (MobileLLaMA-1.4B) is close in scale to TinyLlama, and its FLOPs
+  split (47.5% vision) is architecturally plausible (unlike TinyLLaVA-Phi2's ⚠ above).
+  FlexLLaVA-TinyLlama's lower vision-FLOPs-share (36.1%) despite a *smaller* LLM
+  (1.1B vs 1.4B) is consistent with running at only 256 tokens rather than MobileVLM's
+  576 — exactly the elasticity axis this project is about.
+- **SmolVLM is not directly comparable to the others** — its own default dynamic image
+  tiling multiplies vision cost by tile count, which is why every one of its numbers
+  (5998 GFLOPs, 267ms vision latency) is 5–15x larger than any single-crop model here.
+  Its 78% vision-latency share is real for *its own* default settings, not a fair
+  "SigLIP vs Llama-family" comparison against the other four rows.
