@@ -85,6 +85,11 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         if elastic_args.use_coral
         else "DISABLED"
     )
+    decorr_str = (
+        f"enabled  (decorr_weight={elastic_args.decorr_weight}, query tokens only)"
+        if elastic_args.use_token_decorrelation
+        else "DISABLED"
+    )
     llm_lora_enabled = _get_argv_value("--lora_enable").lower() not in ("false", "0", "no", "?")
     if llm_lora_enabled:
         llm_lora_str = f"enabled  (rank={_get_argv_value('--lora_r')}, alpha={_get_argv_value('--lora_alpha')})"
@@ -113,6 +118,7 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         f"  Query select   : {qsel_str}\n"
         f"  KD loss        : {kd_str}\n"
         f"  CORAL loss     : {coral_str}\n"
+        f"  Decorr loss    : {decorr_str}\n"
         f"{sep}\n",
         flush=True,
     )
@@ -226,12 +232,36 @@ def _parse_elastic_args():
                         "deterministic average-pooled spatial grid, the rest are "
                         "queries made pool-aware by self-attention before they "
                         "cross-attend to the patches. See docs/EXPERIMENT_JOURNAL.md.")
+    p.add_argument("--anchor_mode", choices=("ratio", "fixed"), default="ratio",
+                   help="'ratio' (default): anchor count is always --anchor_ratio of "
+                        "whatever budget is active, computed for any budget. 'fixed': "
+                        "--anchor_routing IS the routing table, a step function over "
+                        "the budgets you declare (PARCEL's own literal design) -- "
+                        "requires --anchor_routing.")
+    p.add_argument("--anchor_ratio", type=float, default=0.25,
+                   help="Fraction of the budget spent on anchors in --anchor_mode "
+                        "ratio (default 0.25). Ignored in 'fixed' mode.")
     p.add_argument("--anchor_routing", type=str, default=None, metavar="B:NP,...",
-                   help="Anchor counts per budget for --resampler_arch pool_anchored, "
-                        "e.g. '256:64,144:36,64:16,16:4'. Each NP must be a perfect "
-                        "square reachable by integer pooling of the patch grid, and "
-                        "must be monotone in budget. Omit to derive ~25%% of each "
-                        "budget automatically.")
+                   help="Anchor counts per budget, e.g. '256:64,144:36,64:16,16:4'. "
+                        "REQUIRED in --anchor_mode fixed (it is the routing table); "
+                        "optional in 'ratio' mode (a per-budget override). Each NP "
+                        "must be a perfect square reachable by integer pooling of the "
+                        "patch grid, and monotone in budget.")
+    p.add_argument("--use_token_decorrelation", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=False, metavar="BOOL",
+                   help="Penalize off-diagonal cosine similarity among the QUERY "
+                        "tokens each step (default False). For resampler_arch="
+                        "pool_anchored this excludes the deterministic anchor "
+                        "prefix (already ~98%% effective rank, see "
+                        "EXPERIMENT_JOURNAL.md §11) and applies only to the "
+                        "learned queries, which §11 measured as MORE collapsed "
+                        "than the plain-query baseline (13.9%% vs 50.8%% rank). "
+                        "For resampler_arch=query every token is a query, so it "
+                        "applies to all of them.")
+    p.add_argument("--decorr_weight", type=float, default=0.01,
+                   help="Weight on the token-decorrelation loss term (default 0.01, "
+                        "matching coral_weight's scale). Ignored if "
+                        "--use_token_decorrelation is False.")
     elastic_args, remaining = p.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining  # hide elastic flags from HfArgumentParser
     return elastic_args
@@ -268,9 +298,13 @@ def main():
         pos_embed_type=elastic_args.pos_embed_type,
         query_selection=elastic_args.query_selection,
         resampler_arch=elastic_args.resampler_arch,
+        anchor_mode=elastic_args.anchor_mode,
+        anchor_ratio=elastic_args.anchor_ratio,
         anchor_routing=_parse_anchor_routing(elastic_args.anchor_routing),
         use_nested_dropout=elastic_args.use_nested_dropout,
         projector_out_norm=elastic_args.projector_out_norm,
+        use_token_decorrelation=elastic_args.use_token_decorrelation,
+        decorr_weight=elastic_args.decorr_weight,
         kl_teacher_tok_level=0,                 # largest tok level is teacher
         n_sample_students=elastic_args.n_sample_students,
         log_adapter_every=50,

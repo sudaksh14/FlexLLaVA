@@ -98,7 +98,9 @@ class ElasticEngine:
                 pos_embed_type=getattr(cfg, "pos_embed_type", "learned"),
                 query_selection=getattr(cfg, "query_selection", "prefix"),
                 resampler_arch=getattr(cfg, "resampler_arch", "query"),
-                anchor_routing=getattr(cfg, "anchor_routing", None))
+                anchor_routing=getattr(cfg, "anchor_routing", None),
+                anchor_mode=getattr(cfg, "anchor_mode", "ratio"),
+                anchor_ratio=getattr(cfg, "anchor_ratio", 0.25))
         # Projector stays full-width (no nesting): width is not an elasticity axis.
         self.projector = NestedProjector(vision_dim, llm_dim, widths=None,
                                          out_norm=getattr(cfg, "projector_out_norm", False))
@@ -161,6 +163,24 @@ class ElasticEngine:
         x = F.avg_pool2d(x, kernel_size=k, stride=k)
         return x.permute(0, 2, 3, 1).reshape(N, -1, C)
 
+    def query_tokens_for_decorr(self, tokens, n_tok):
+        """Slice out the sub-block decorrelation should act on.
+
+        For resampler_arch="pool_anchored" this is the QUERY tokens only,
+        excluding the leading anchor block: §11 of EXPERIMENT_JOURNAL.md
+        measured PARCEL's anchors at 98% effective rank (deterministic
+        average-pooling, already working as designed -- nothing to fix) while
+        its queries were MORE collapsed than the plain-query baseline (13.9%
+        vs 50.8%), so decorrelation pressure belongs on the queries alone.
+        For resampler_arch="query" every token is a query already, so this is
+        a no-op slice (the full tensor).
+        tokens: (N, n_tok, d).
+        """
+        if self.cfg.resampler_arch == "pool_anchored":
+            n_anchor = self.resampler.n_anchors_for(n_tok, self.resampler.num_patches)
+            return tokens[:, n_anchor:]
+        return tokens
+
     # -- extra matryoshka losses (nested_query only) --------------------
     def extra_losses(self, student_logits, teacher_logits, labels,
                      student_tokens=None, teacher_tokens=None):
@@ -171,7 +191,10 @@ class ElasticEngine:
             total = total + self.cfg.coral_weight * losses.coral_loss(
                 student_tokens, teacher_tokens.detach())
         if self.cfg.use_token_decorrelation and student_tokens is not None:
-            total = total + self.cfg.decorr_weight * losses.decorrelation_loss(student_tokens)
+            n_tok = student_tokens.shape[1]
+            decorr_tokens = self.query_tokens_for_decorr(student_tokens, n_tok)
+            if decorr_tokens.shape[1] > 1:
+                total = total + self.cfg.decorr_weight * losses.decorrelation_loss(decorr_tokens)
         return total
 
     @torch.no_grad()
@@ -245,7 +268,23 @@ def attach_elastic_engine(model, cfg):
         from .nested_lora import inject_nested_lora
         from .elastic_vision_tower import CLIP_LORA_TARGETS
         inner = getattr(vt, "vision_tower", vt)
-        wrappers = inject_nested_lora(inner, CLIP_LORA_TARGETS, cfg.lora_ranks,
+        # SiglipVisionModel (unlike CLIPVisionModel) has an internal attention
+        # pooling head (vision_model.head, a MultiheadAttentionPoolingHead)
+        # that ALWAYS runs during forward regardless of whether the caller
+        # reads pooler_output -- SigLIPVisionTower never does, it only reads
+        # hidden_states. inject_nested_lora matches by attribute name
+        # ("out_proj") anywhere in the tree, so injecting into the whole
+        # tower also swaps the pooling head's nn.MultiheadAttention.out_proj
+        # -- and PyTorch's fused MHA implementation reads that submodule's
+        # .weight/.bias directly rather than calling it, which a
+        # NestedLoRALinear wrapper does not have, crashing every forward
+        # ("'NestedLoRALinear' object has no attribute 'weight'"). Scope to
+        # just the encoder layers (the part actually used) when this nesting
+        # is present; CLIP has no such head, so it takes the unchanged path.
+        lora_target = inner
+        if hasattr(inner, "vision_model") and hasattr(inner.vision_model, "encoder"):
+            lora_target = inner.vision_model.encoder
+        wrappers = inject_nested_lora(lora_target, CLIP_LORA_TARGETS, cfg.lora_ranks,
                                       cfg.lora_alpha, cfg.lora_dropout)
         vt._lora_wrappers = wrappers
         def _set_level(lvl, _w=wrappers):

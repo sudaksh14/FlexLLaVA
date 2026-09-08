@@ -230,6 +230,7 @@ class LlavaElasticMixin:
             ce_total = 0.0
             kl_total = 0.0
             coral_total = 0.0
+            decorr_total = 0.0
             per_level = {}
             logits_accumulate = []
             grid = list(engine.grid())
@@ -304,6 +305,23 @@ class LlavaElasticMixin:
                 loss += loss_item / n_active
                 ce_total += loss_item.item() / n_active
                 cur_tokens = engine.last_tokens
+                if cfg.use_token_decorrelation and cur_tokens is not None:
+                    # Applied at EVERY level (teacher included), not gated on
+                    # student/teacher role like KL/CORAL -- collapse is a
+                    # per-level property of the resampler output, not
+                    # something specific to distillation. Sliced to the
+                    # actual realized token count (nested-dropout can
+                    # truncate below the nominal tok_levels[l_tok] budget for
+                    # non-teacher levels), so pool_anchored's anchor/query
+                    # split matches what this forward actually produced.
+                    decorr_tokens = engine.query_tokens_for_decorr(cur_tokens, cur_tokens.shape[1])
+                    if decorr_tokens.shape[1] > 1:
+                        decorr = _el.decorrelation_loss(decorr_tokens)
+                        self._health_check(f"decorr_{tag}", decorr)
+                        decorr_weighted = cfg.decorr_weight * decorr / n_active
+                        decorr_total += decorr_weighted.item()
+                        per_level[f"loss/decorr_{tag}"] = decorr.item()
+                        loss = loss + decorr_weighted
                 if l_tok == cfg.kl_teacher_tok_level:
                     # With an EXTERNAL teacher the largest level is a student
                     # too, so only take its CORAL tokens here and let the KL
@@ -346,6 +364,7 @@ class LlavaElasticMixin:
 
             self._loss_components = {
                 "loss/ce": ce_total, "loss/kl": kl_total, "loss/coral": coral_total,
+                "loss/decorr": decorr_total,
                 **per_level,
             }
             if sampled_students is not None:

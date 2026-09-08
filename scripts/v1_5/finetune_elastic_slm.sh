@@ -139,6 +139,10 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --lora_ranks ${LORA_RANKS:-8 16 32 64} \
     --resampler_arch "${RESAMPLER_ARCH:-query}" \
     --anchor_routing "${ANCHOR_ROUTING:-}" \
+    --anchor_mode "${ANCHOR_MODE:-ratio}" \
+    --anchor_ratio "${ANCHOR_RATIO:-0.25}" \
+    --use_token_decorrelation "${USE_TOKEN_DECORRELATION:-False}" \
+    --decorr_weight "${DECORR_WEIGHT:-0.01}" \
     --teacher "${TEACHER:-self}" \
     --teacher_model_path "${TEACHER_MODEL_PATH:-liuhaotian/llava-v1.5-7b}" \
     --prefix_kl_weight "${PREFIX_KL_WEIGHT:-0.1}" \
@@ -161,7 +165,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --version "${CONV_VERSION}" \
     --data_path /var/scratch/skalra/flexllava/data/LLaVA-Finetune/llava_v1_5_mix665k.json \
     --image_folder /var/scratch/skalra/flexllava/data/LLaVA-Finetune \
-    --vision_tower openai/clip-vit-large-patch14-336 \
+    --vision_tower "${VISION_TOWER:-openai/clip-vit-large-patch14-336}" \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \

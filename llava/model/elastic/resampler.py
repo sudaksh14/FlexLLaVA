@@ -111,7 +111,8 @@ class NestedQueryResampler(nn.Module):
     def __init__(self, dim, num_queries, num_patches=576, n_heads=8, depth=2,
                  use_pos_embed: bool = False, pos_embed_type: str = "learned",
                  query_selection: str = "prefix",
-                 resampler_arch: str = "query", anchor_routing=None):
+                 resampler_arch: str = "query", anchor_routing=None,
+                 anchor_mode: str = "ratio", anchor_ratio: float = 0.25):
         """
         Args:
             dim:           hidden dim (must match ViT output dim, e.g. 1024 for CLIP-L)
@@ -189,7 +190,17 @@ class NestedQueryResampler(nn.Module):
         if resampler_arch not in ("query", "pool_anchored"):
             raise ValueError(f"resampler_arch={resampler_arch!r}; expected "
                              f"'query' or 'pool_anchored'")
+        if anchor_mode not in ("ratio", "fixed"):
+            raise ValueError(f"anchor_mode={anchor_mode!r}; expected 'ratio' or 'fixed'")
+        self.anchor_mode = anchor_mode
+        self.anchor_ratio = anchor_ratio
         if resampler_arch == "pool_anchored":
+            if anchor_mode == "fixed" and not self.anchor_routing:
+                raise ValueError(
+                    "resampler_arch='pool_anchored' with anchor_mode='fixed' requires "
+                    "anchor_routing (it IS the routing table, not an override) -- "
+                    "'fixed' means a literal step function over budgets you declare, "
+                    "there is nothing to fall back to without one.")
             valid = valid_anchor_counts(num_patches)
             if self.anchor_routing:
                 for b, npch in sorted(self.anchor_routing.items()):
@@ -266,18 +277,34 @@ class NestedQueryResampler(nn.Module):
     def n_anchors_for(self, budget: int, num_patches: int) -> int:
         """How many of `budget` tokens are pooled spatial anchors.
 
-        Uses anchor_routing when the exact budget is declared. Otherwise falls
-        back to ~25% of the budget snapped DOWN to the nearest reachable grid --
-        needed because nested dropout hands us arbitrary budgets that no routing
-        table can enumerate. Always leaves at least one query token so the
-        pooled branch never degenerates into plain M3 average pooling.
+        "ratio" mode (default): always ~anchor_ratio of THIS budget, computed
+        fresh for any budget -- declared in anchor_routing or not -- by
+        snapping down to the nearest reachable anchor grid. anchor_routing is
+        an optional per-budget override in this mode, not a requirement.
+
+        "fixed" mode: anchor_routing IS the routing table (enforced non-empty
+        at construction). An exact match uses that value; an undeclared
+        budget uses PARCEL's own step-function semantics -- the value from
+        the largest declared budget <= this one, or the smallest declared
+        entry's value if this budget is below all of them.
+
+        Both modes always leave at least one query token, so the pool_anchored
+        branch never degenerates into plain M3 average pooling.
         """
         valid = valid_anchor_counts(num_patches)
-        if self.anchor_routing and budget in self.anchor_routing:
-            n_p = self.anchor_routing[budget]
+        if self.anchor_mode == "fixed":
+            table = self.anchor_routing
+            if budget in table:
+                n_p = table[budget]
+            else:
+                below = [b for b in table if b <= budget]
+                n_p = table[max(below)] if below else table[min(table)]
         else:
-            target = max(1, budget // 4)
-            n_p = max((v for v in valid if v <= target), default=1)
+            if self.anchor_routing and budget in self.anchor_routing:
+                n_p = self.anchor_routing[budget]
+            else:
+                target = max(1, round(budget * self.anchor_ratio))
+                n_p = max((v for v in valid if v <= target), default=1)
         # Never consume the whole budget: keep >=1 query so the "division of
         # labour" this architecture exists for actually happens.
         while n_p >= budget and n_p > 1:

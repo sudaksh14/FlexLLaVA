@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as _checkpoint
 
 from transformers import SiglipVisionModel, SiglipImageProcessor, SiglipVisionConfig
 
@@ -45,22 +46,48 @@ class SigLIPVisionTower(nn.Module):
         # SigLIP has no CLS token — return all patch positions from selected layer.
         return image_forward_outs.hidden_states[self.select_layer]
 
-    @torch.no_grad()
-    def forward(self, images):
+    def _encode(self, images, l_enc):
+        # See CLIPVisionTower._encode for why l_enc is (re-)applied here rather
+        # than by the caller mutating shared LoRA-level state beforehand: HF's
+        # per-layer gradient checkpointing recomputes activations during
+        # backward, and setting the level inside this function body (which
+        # always runs top-to-bottom before delegating into self.vision_tower)
+        # is what keeps every recompute -- including nested per-layer ones --
+        # seeing the correct level. Mirrored here verbatim; this tower had no
+        # l_enc handling at all until nested vision LoRA was first exercised
+        # against it (2026-09-08), so it never reached this failure mode
+        # before -- SigLIP had simply never been used with vision LoRA on.
+        if l_enc is not None and hasattr(self, "set_level"):
+            self.set_level(l_enc)
+        out = self.vision_tower(images, output_hidden_states=True)
+        return self.feature_select(out)
+
+    def forward(self, images, l_enc=None):
+        # No blanket @torch.no_grad(): matches the CLIP tower's fix (see its
+        # own forward()) for the same reason -- the base SigLIP backbone is
+        # frozen (requires_grad_(False) in load_model), so no_grad costs
+        # nothing when no LoRA is injected, but when nested LoRA IS injected
+        # its lora_A/lora_B need a real autograd graph to receive gradients.
+        # This tower had @torch.no_grad() unconditionally until now, which
+        # would have silently zeroed every vision-LoRA gradient.
+        use_checkpoint = (l_enc is not None and hasattr(self, "set_level")
+                          and self.training and torch.is_grad_enabled())
         if type(images) is list:
             image_features = []
             for image in images:
-                out = self.vision_tower(
-                    image.to(device=self.device, dtype=self.dtype).unsqueeze(0),
-                    output_hidden_states=True,
-                )
-                image_features.append(self.feature_select(out).to(image.dtype))
+                img = image.to(device=self.device, dtype=self.dtype).unsqueeze(0)
+                if use_checkpoint:
+                    feat = _checkpoint.checkpoint(self._encode, img, l_enc, use_reentrant=False)
+                else:
+                    feat = self._encode(img, l_enc)
+                image_features.append(feat.to(image.dtype))
         else:
-            out = self.vision_tower(
-                images.to(device=self.device, dtype=self.dtype),
-                output_hidden_states=True,
-            )
-            image_features = self.feature_select(out).to(images.dtype)
+            img = images.to(device=self.device, dtype=self.dtype)
+            if use_checkpoint:
+                image_features = _checkpoint.checkpoint(self._encode, img, l_enc, use_reentrant=False)
+            else:
+                image_features = self._encode(img, l_enc)
+            image_features = image_features.to(images.dtype)
         return image_features
 
     @property

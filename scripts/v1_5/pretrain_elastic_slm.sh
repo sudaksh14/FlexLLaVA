@@ -139,6 +139,10 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --lora_ranks ${STAGE1_LORA_RANK} \
     --resampler_arch "${RESAMPLER_ARCH:-query}" \
     --anchor_routing "${ANCHOR_ROUTING:-}" \
+    --anchor_mode "${ANCHOR_MODE:-ratio}" \
+    --anchor_ratio "${ANCHOR_RATIO:-0.25}" \
+    --use_token_decorrelation "${USE_TOKEN_DECORRELATION:-False}" \
+    --decorr_weight "${DECORR_WEIGHT:-0.01}" \
     --prefix_kl_weight 0.1 \
     --vision_lora_enable True \
     --coral_weight 0.01 \
@@ -151,7 +155,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --version "${CONV_VERSION}" \
     --data_path /var/scratch/skalra/flexllava/data/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json \
     --image_folder /var/scratch/skalra/flexllava/data/LLaVA-Pretrain \
-    --vision_tower openai/clip-vit-large-patch14-336 \
+    --vision_tower "${VISION_TOWER:-openai/clip-vit-large-patch14-336}" \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \

@@ -203,7 +203,12 @@ anything under `llava/model/elastic/`.
 
 Full narrative — decisions, results, bugs, and the current forward plan — is in
 **[docs/EXPERIMENT_JOURNAL.md](docs/EXPERIMENT_JOURNAL.md)**. Mechanism-level detail is
-in [docs/ELASTIC_PIPELINE.md §9](docs/ELASTIC_PIPELINE.md#9-experiment-history). Summary:
+in [docs/ELASTIC_PIPELINE.md §9](docs/ELASTIC_PIPELINE.md#9-experiment-history). The
+research-only survey of per-image adaptive token budgets (early-exit / MoE / cascades /
+speculative decoding / KV-cache reuse) and the ranked list of what could be looped into
+this codebase is
+**[docs/ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](docs/ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md)**
+— nothing in it is implemented. Summary:
 
 - **v4**: reference baseline. Vision-tower LoRA and nested dropout both off. Every
   backbone tested (TinyLlama, Phi-2, SmolLM2) shows ~0 accuracy delta between 256

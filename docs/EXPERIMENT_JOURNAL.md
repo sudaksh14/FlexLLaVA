@@ -39,6 +39,13 @@ Every decision below is the user's; the "result" column is what actually happene
 | 14 | Execute the v8 PARCEL plan; queue it on node208. | **v8-parcel** launched (job 27303, eval 27304). Unit tests + end-to-end smoke both pass. Two deliberate deviations from the plan below — see §8-note. |
 | 15 | Build a paper motivation section: (a) peak-memory comparison, LLaVA-7B vs FlexLLaVA vs original TinyLLaVA/MobileVLM/SmolVLM, on node207; (b) vision-vs-LLM params/FLOPs/latency split for FlexLLaVA-TinyLlama. | Both measured (§9). Found and fixed a real inference-path gap along the way: bare `forward()` calls silently drop `matryoshka_vis_token_scale` outside training/`generate()`. MobileVLM/SmolVLM initially left unmeasured — package-version conflicts in the shared training env, not fixed in place to avoid risking the 4 jobs running in it. |
 | 16 | Extend the vision-vs-LLM split (decision 15b) to LLaVA-7B, TinyLLaVA-Phi2, MobileVLM, SmolVLM too, not just FlexLLaVA. | All 5 measured (§9c), via a new isolated `flexllava-refs` conda env for MobileVLM/SmolVLM — zero changes to the shared `matryoshka-mm` env the 4 training jobs depend on. One number (TinyLLaVA-Phi2's LLM FLOPs) flagged as likely unreliable rather than reported at face value — see §9c. |
+| 17 | Formalize two anchor-routing modes (fixed per-budget table vs always-ratio), default to ratio at 25%, use it now. | Implemented, unit-tested (§10a). `anchor_mode`/`anchor_ratio` on `ElasticConfig`, CLI flags, launcher env vars — default unchanged behavior unless set. |
+| 18 | Queue SigLIP + TinyLlama + PARCEL on the full budget ladder, on node205 or node208 if it fits. | **v9-siglip-parcel** queued on node208 (job 27324, eval 27325), behind v8-parcel (~4h out at queue time). Found and fixed two real SigLIP bugs along the way — vision LoRA had simply never been exercised on SigLIP before (§10b). |
+| 19 | Measure the visual-token rank story with real numbers (no pos-embed → pos-embed → PARCEL) for a paper section; also check whether raising vision-LoRA rank would help, and whether the current rank ladder has any grounding in the literature. | Measured (§11): pos-embed 130/256 (50.8%) vs the cited ~12/256 (4.7%); PARCEL splits into anchors 62.7/64 (98.0%, works as designed) vs queries 26.7/192 (13.9%, **worse** than the plain baseline, not better) — a real, non-obvious finding, written up with the caveat intact rather than only the flattering anchor number. LoRA-rank literature research done separately (not in the journal) — r=64 is defensible only as "above where sweeps go flat," not a validated optimum; one paper (LangVision-LoRA-NAS) suggests r=16 may be closer to a real sweet spot. Also found and fixed a real bug along the way: `anchor_routing`'s dict keys silently became strings on JSON reload (`ElasticConfig.__post_init__`), which would have broken v8-parcel's queued eval. |
+| 20 | Check whether the rank measurement is dataset-dependent (COCO vs a more general/detail-hungry set); brainstorm (research only, no implementation) using rank info to condition anchor/query budget allocation on the input. | Measured on TextVQA too (§11a): content-dependence is real and consistently signed across all 8 conditions checked — COCO alone would have been a real gap, not a defensible simplification. Anchors are content-insensitive (already at their ceiling); queries remain content-responsive even under PARCEL's suppressed baseline. Four mechanisms brainstormed (§12), with the existing-but-unused `decorrelation_loss` (mechanism C) argued as the right first move given what §11/§11a actually show, ahead of building any new router. |
+| 21 | Implement mechanism C (§12): wire up `use_token_decorrelation`/`decorr_weight`, off by default, applied to the QUERY tokens only. Turn it on for a new run using **CLIP**, not SigLIP, as the vision tower — a fair comparison against v4/v8-parcel (both CLIP), isolating the decorrelation effect from the SigLIP swap. | Implemented (§13). `engine.extra_losses` was dead code — the real per-level loop lives in `llava_elastic_mixin.py` and never called it, so `use_token_decorrelation` had literally never run despite existing on `ElasticConfig` since it was added. Wired a real per-level decorrelation term into that loop, added `ElasticEngine.query_tokens_for_decorr` (slices off the anchor prefix for `pool_anchored`, no-op for plain `query`), added `--use_token_decorrelation`/`--decorr_weight` CLI flags (unit-tested, job 27337, `ALL_TESTS_PASSED`). Cancelled the not-yet-started v9-siglip-parcel jobs (27324/27325 — still `PENDING(Resources)`, nothing lost) and requeued as **v9-parcel-decorr** (job 27338, eval 27339): CLIP vision tower (the launcher's own default — SigLIP was only ever an explicit override), `resampler_arch=pool_anchored`, `use_token_decorrelation=True`, same full ladder as v6/v8. |
+| 22 | Queue a final rank re-measurement (COCO + TextVQA) for v8-parcel once it actually finishes training, so §11/§11a's paper numbers are taken against the FINAL checkpoint, not the 96%-trained checkpoint-5000 snapshot. Separately, run a literature check on §12's novelty claim (input-conditional anchor/query allocation). | Rank re-measurement queued as job 27340, `--dependency=afterok:27303` (v8-parcel's training job) — fires automatically on completion, auto-detects whichever checkpoint `save_total_limit=1` leaves behind rather than hardcoding a step number. Literature check done (§14): found the actual paper "PARCEL" is based on, confirmed it is NOT content-adaptive either, found one close routing precedent (AVG-LLaVA) that narrows but does not eliminate the claimed gap. |
+| 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
 
 ## 2. The Otter arc (decisions 1–4)
 
@@ -511,3 +518,408 @@ for this one row should be treated as unreliable.
   (5998 GFLOPs, 267ms vision latency) is 5–15x larger than any single-crop model here.
   Its 78% vision-latency share is real for *its own* default settings, not a fair
   "SigLIP vs Llama-family" comparison against the other four rows.
+
+## 10. v9-siglip-parcel: PARCEL with SigLIP, full ladder, formalized anchor modes
+
+### 10a. Two anchor modes, "ratio" made the default (decision 17)
+
+v8-parcel's anchor split (`{256:64, 144:36, 64:16, 16:4}`) was a hand-picked table
+that happened to be exactly 25% at every entry. Formalized into two modes on
+`NestedQueryResampler` / `ElasticConfig`, both requiring `resampler_arch="pool_anchored"`:
+
+- **`anchor_mode="ratio"`** (new default): anchor count is always `anchor_ratio`
+  (default **0.25**) of whatever budget is active, computed fresh for ANY budget —
+  declared in `anchor_routing` or not — by snapping down to the nearest anchor count
+  reachable by integer pooling. `anchor_routing` becomes an optional per-budget
+  override rather than a requirement. This reproduces v8-parcel's exact table with
+  **no table at all**, and extends cleanly to budgets it never covered (the full
+  576..16 ladder).
+- **`anchor_mode="fixed"`**: `anchor_routing` IS the routing table (raises at
+  construction if empty) — a literal step function over the budgets you declare,
+  PARCEL's own original design (constant within a band, not scaling continuously).
+  An undeclared budget takes the value from the largest declared budget ≤ it, or the
+  smallest declared entry's value if below all of them.
+
+Both share the same non-degenerate-budget safety clamp (never spend the whole budget
+on anchors, always leave ≥1 query token). Note this clamp is not just cosmetic: with
+`anchor_mode="fixed"` and a routing table whose smallest entry equals the smallest
+budget (e.g. `{64:16, ...}` used at budget 16), the raw lookup would consume 100% of
+the budget — the clamp shrinks 16→9 in that case, which surprised a first version of
+the unit test that hadn't accounted for it.
+
+`--anchor_mode` / `--anchor_ratio` are new `train_elastic.py` flags and
+`ANCHOR_MODE` / `ANCHOR_RATIO` env vars in both launcher scripts, defaulting to
+`ratio` / `0.25` — nothing changes for existing runs unless set explicitly.
+Validated in `jobs/test_anchor_mode_and_siglip.sh`.
+
+**One real property surfaced by the unit test, not a bug**: on a 24×24 (576-patch)
+grid only 8 anchor counts are reachable by integer pooling (1, 4, 9, 16, 36, 64, 144,
+576), so `ratio` mode is itself a step function, not smooth — `round(budget × 0.25)`
+for budget ∈ {384, 448, 512} all snap down to the same 64 anchors, and only 576
+itself reaches the next rung (144). Worth knowing before reading too much into small
+differences between adjacent high-end budgets in v9's per-level telemetry.
+
+### 10b. SigLIP support — two real bugs found and fixed, not novel to this experiment
+
+Building the SigLIP+PARCEL run surfaced two bugs in `SigLIPVisionTower`
+(`llava/model/multimodal_encoder/siglip_encoder.py`) that had nothing to do with
+PARCEL specifically — they'd have broken **any** attempt to run vision LoRA on
+SigLIP, elastic or not, because that combination had simply never been exercised
+before (every LoRA run to date used CLIP):
+
+1. **`forward()` had no `l_enc` parameter at all**, unlike `CLIPVisionTower`'s. Since
+   `encode_images` always calls the tower with `l_enc=...` once vision LoRA is
+   attached, this fails loudly (`TypeError`) the instant training starts — safe, but
+   a hard blocker. Fixed by mirroring CLIP's `_encode`/`forward` split exactly,
+   including the gradient-checkpointing-safe re-application of `set_level` inside the
+   (possibly checkpointed) function body.
+2. **Blanket `@torch.no_grad()`** — the *exact* bug CLIP's own code comment already
+   documents fixing (see §3/decision 6's era): with LoRA injected, `lora_A`/`lora_B`
+   need a real autograd graph to receive gradients, and `no_grad()` silently blocks
+   that. SigLIP still had it, apparently never ported when CLIP was fixed.
+3. **(Found via the smoke test, not the unit test)** `inject_nested_lora`'s fallback
+   in `attach_elastic_engine` (`engine.py`) matches by attribute name (`out_proj`)
+   anywhere in the tower. `SiglipVisionModel` — unlike `CLIPVisionModel` — has an
+   internal attention-pooling head (`vision_model.head`, a
+   `MultiheadAttentionPoolingHead` wrapping a plain `nn.MultiheadAttention`) that
+   *always* runs during forward regardless of whether the caller reads
+   `pooler_output` (`SigLIPVisionTower` never does). Injecting into the whole tower
+   also swaps that head's `out_proj`, and PyTorch's fused attention implementation
+   reads `.weight`/`.bias` directly off it rather than calling it — a
+   `NestedLoRALinear` wrapper has neither, so every forward crashed with
+   `'NestedLoRALinear' object has no attribute 'weight'`. Fixed by scoping the
+   injection to `vision_model.encoder` (the part actually used) when that nesting is
+   present; CLIP has no such head, so it takes the unchanged path.
+
+Also picked `google/siglip-base-patch16-384` over TinyLLaVA's
+`so400m-patch14-384`: `384/14≈27.43` gives a 729-patch grid whose divisors
+(1, 3, 9, 27) make anchor counts lumpy (only 1/9/81/729 reachable — no clean ~25% at
+any of our budgets, see §9c's TinyLLaVA row for the same grid). `patch16-384` gives
+`384/16=24` exactly — the identical 576-patch, highly-composite grid as CLIP, so the
+existing token ladder, LoRA ranks, and anchor math all transfer with zero changes,
+and the model is smaller (768-dim vs 1152-dim, faster to iterate).
+
+`--vision_tower` is now `VISION_TOWER`-env-overridable in both launcher scripts
+(previously hardcoded to CLIP inline) — needed to point at SigLIP without forking
+the scripts.
+
+### 10c. The run
+
+**v9-siglip-parcel** (job 27324, eval 27325 with `--array=0-7`): SigLIP-base-patch16-384
++ TinyLlama, `resampler_arch=pool_anchored`, `anchor_mode=ratio` (default, 0.25),
+same full ladder and LoRA ranks as v6/v8 (`576 512 448 384 256 144 64 16` /
+`2 4 6 8 8 16 32 64`). Queued on node208 behind v8-parcel (95% done at queue time, ~4h
+left) rather than waiting for a free node — SLURM's own GPU accounting handles the
+sequencing. Stage 1 must be re-run (new vision tower entirely, nothing to warm-start
+from). Validated first: `jobs/test_anchor_mode_and_siglip.sh` (anchor-mode math,
+SigLIP `l_enc`/gradient flow, pooling-head regression guard — all pass) and
+`jobs/smoke_v9_siglip_parcel.sh` (Stage 1 + Stage-2 warm-start on real data, node207).
+
+**Smoke result**: passed, but not on the first try. The first attempt (job 27323) ran
+Stage 1 cleanly (3/3 steps) then hit a **CUDA OOM in Stage 2 — before any real
+training step ran**, inside DeepSpeed's own ZeRO optimizer-state initialization
+(`torch.cuda.OutOfMemoryError` at `_multi_tensor_adamw`/`_foreach_sqrt`). Not a
+code bug: this is the identical failure already documented for SmolLM2 on a single
+A10 (§2/decision 7) — ZeRO-2 cannot shard optimizer state across 1 GPU, and this
+config's ~1.47B params (TinyLlama + SigLIP + the new `pool_self_attn` block) doesn't
+fit unsharded in 22GB. Deliberately smoke-tested on node207's single A10 for fast
+turnaround while node208 (2 GPUs) was occupied by v8-parcel; the real run
+(`ELASTIC_RUN_TAG=v9-siglip-parcel`) targets 2 GPUs, where sharding resolves this
+without needing offload. Rather than accept "Stage 1 worked" as sufficient — the OOM
+happened before Stage 2 ever exercised the actual new code (SigLIP `l_enc`
+threading, the pool-anchored branch, the full ladder) — added
+`scripts/zero2_offload_smoke_only.json` (CPU-offloaded optimizer state, ZeRO stage
+unchanged at 2, so it validates forward/backward shapes identically to the real
+config; explicitly not used by any real training script) and re-ran (job 27326).
+Both stages then completed cleanly: Stage 1 loss 9.35→8.74→7.82, Stage 2 loss
+4.93→6.04→3.61 with stable grad norms (89.4→72.6→66.8, no NaN/Inf) across all 3
+steps — real confirmation that SigLIP's `l_enc` path, the scoped LoRA injection, and
+PARCEL's anchor/query split all execute correctly together across the full 8-level
+budget ladder before committing two A10s to a multi-day run.
+
+## 11. Analyzing visual-token rank degradation under nested-query resampling
+
+Methodology: `debug/measure_token_rank.py`. For a checkpoint, run the vision tower +
+resampler + projector (bypassing the LLM) on N=24 real COCO images at the checkpoint's
+largest trained tok_level (256, matching what job 26568 originally measured), take the
+`(n_tok, llm_dim)` projected-token matrix for one image, center it, and compute: mean
+pairwise cosine similarity (job 26568's own metric); numerical rank via SVD at two
+thresholds (singular value > 1% / > 5% of the largest — "how many directions actually
+carry signal"); and the number of singular values needed to explain 99% of variance
+(scale-invariant). Reported as mean ± std across the 24 images. Job 26568's own script
+no longer exists to diff against, so its number is cited, not reproduced with this
+exact methodology — treat the *direction and magnitude* of the later comparisons as
+the reliable part, not bit-for-bit comparability with the historical figure.
+
+| stage | mechanism | rank @1% | rank @5% | rank (99% var) | mean cosine |
+|---|---|---:|---:|---:|---:|
+| **no positional embeddings** (job 26568, TinyLlama, *cited — checkpoint no longer exists*) | pure queries | **~12 / 256** | — | — | **0.91** |
+| **positional embeddings on** (v4, measured this session, n=24 imgs) | pure queries | 130.0 ± 13.8 / 256 (50.8%) | 37.2 ± 5.4 (14.5%) | 57.2 ± 5.5 (22.3%) | 0.672 ± 0.028 |
+| **PARCEL spatial anchors** (v8-parcel, checkpoint-5000, 96% trained, n=24 imgs) — **full set** | 64 anchors + 192 queries | 44.0 ± 4.7 / 256 (17.2%) | 7.8 ± 1.0 (3.0%) | 10.4 ± 1.9 (4.1%) | 0.521 ± 0.011 |
+| PARCEL — **anchors only** | 64 deterministic pooled | 62.7 ± 0.9 / 64 (**98.0%**) | 40.5 ± 5.5 (63.3%) | 38.8 ± 3.3 (60.5%) | 0.515 ± 0.049 |
+| PARCEL — **queries only** | 192 pool-conditioned learned | 26.7 ± 2.0 / 192 (**13.9%**) | 5.1 ± 0.4 (2.7%) | 5.5 ± 0.8 (2.8%) | 0.784 ± 0.012 |
+
+**Reading, in order:**
+
+1. **Positional embeddings closed most of the gap, not all of it.** Job 26568's ~12/256
+   (4.7%) rank at no positional embeddings, jumping to 130/256 (50.8%) with them on, is
+   a real and large effect — but the stricter thresholds (37/256 at 5%, only 22.3% of
+   variance needed for 57 components) show the representation is still meaningfully
+   redundant, not anywhere near full rank. This matches the eval-level finding that
+   v5 (vision LoRA on top of this) still shows only a small 256-vs-16-token accuracy
+   spread — the queries were never as diverse as 256 independent tokens would suggest.
+
+2. **PARCEL's anchors are essentially full rank (98.0% at the 1% threshold) — the
+   mechanism works exactly as designed.** They're literal averages of different
+   spatial regions of the image, so distinctness is close to guaranteed by
+   construction, not something that needed to be learned. This part of PARCEL's
+   division-of-labour argument is directly validated by this measurement, independent
+   of whatever the eventual eval numbers say.
+
+3. **PARCEL's queries are* more* collapsed than the plain (non-PARCEL) baseline's, not
+   less** — 13.9% rank vs 50.8%, and mean cosine *up* (0.784 vs 0.672, i.e. more
+   redundant). This is the finding worth being careful with in the paper: it directly
+   contradicts a naive "PARCEL fixes the collapse problem" narrative. A plausible
+   mechanism (not confirmed, worth checking before publishing as an explanation): the
+   pool-conditioning self-attention step has every query attend to the *same* shared
+   64-anchor context, which could homogenize their updates rather than differentiate
+   them — the opposite of what positional embeddings do for the plain-query baseline
+   (nudge each query toward a *different* role). Not measured here: whether this
+   homogenization is present from early training or grows over the run, or whether it
+   would look different with `anchor_mode="fixed"` instead of `ratio`.
+
+4. **The full-set numbers (44/256, mean cosine 0.521) are a blend that obscures both
+   effects above** — lower rank than v4 looks like a regression until you see it's
+   actually "excellent anchors + worse queries" averaging out to a lower number, not
+   uniform collapse. Don't quote the full-set row alone without the breakdown; it
+   reads as evidence against PARCEL when the real story is more specific than that.
+
+**What this predicts for the pending eval** (job 27303 still finishing, eval 27304
+queued): if v8-parcel's accuracy does show the budget/accuracy tradeoff v4/v5/otter2
+lacked, this data says to attribute it to the anchors carrying real, non-collapsed
+spatial information into the LLM — essentially M3's original pooling mechanism,
+smuggled back in as half the budget — not to any improvement in the learned query
+mechanism, which by this measure is doing its job worse than before. That would be a
+more precise and more defensible claim for the paper than "PARCEL improves token
+diversity."
+
+**Caveats**: single checkpoint per condition (no seed variance across independent
+training runs); v8-parcel measured at 96% trained (checkpoint-5000 of 5197 steps, the
+current checkpoint at measurement time — `save_total_limit=1` rotates old ones away,
+so this is whatever was latest, not a chosen point, and the number should be re-taken
+against the final checkpoint once training completes for paper-final figures). v4 and
+PARCEL *were* measured on the identical 24 COCO images (both runs used the script's
+default `--seed 0`, so the same `random.sample` draw) — the comparison is apples to
+apples on that axis at least.
+
+### 11a. Does rank depend on the dataset? (decision 20) — yes, checked, not assumed
+
+COCO alone risked understating the picture: it's mostly everyday photos, exactly the
+"coarse, answerable from a global summary" content the mixture-analysis work earlier
+this session (§2) identified as the majority of the training mix. Re-ran both v4 and
+v8-parcel on 24 TextVQA images (same script, `--image_source textvqa`, same seed) —
+dense signage/text, the "detail-hungry" contrast case that `otter/gap` telemetry (§2)
+already flagged as the one place a real budget/accuracy tradeoff would have to show up
+if it existed anywhere.
+
+| condition | dataset | rank@1% | rank@5% | rank(99%var) | mean cos |
+|---|---|---:|---:|---:|---:|
+| v4 — full (pure queries) | COCO | 130.0 ± 13.8 | 37.2 ± 5.4 | 57.2 ± 5.5 | 0.672 ± 0.028 |
+| v4 — full | **TextVQA** | **140.7 ± 13.7** (+8.2%) | 39.8 ± 5.9 | 64.8 ± 6.9 (+13.3%) | **0.592 ± 0.059** (−11.9%) |
+| PARCEL — full | COCO | 44.0 ± 4.7 | 7.8 ± 1.0 | 10.4 ± 1.9 | 0.521 ± 0.011 |
+| PARCEL — full | TextVQA | 46.1 ± 5.6 (+4.8%) | 8.0 ± 1.4 | 11.0 ± 2.1 (+5.8%) | 0.510 ± 0.013 (−2.1%) |
+| PARCEL — anchors only | COCO | 62.7 ± 0.9 | 40.5 ± 5.5 | 38.8 ± 3.3 | 0.515 ± 0.049 |
+| PARCEL — anchors only | TextVQA | 62.0 ± 2.4 (≈0%) | 41.3 ± 9.2 | 38.6 ± 6.1 (≈0%) | 0.490 ± 0.047 |
+| PARCEL — queries only | COCO | 26.7 ± 2.0 | 5.1 ± 0.4 | 5.5 ± 0.8 | 0.784 ± 0.012 |
+| PARCEL — queries only | TextVQA | 29.25 ± 2.4 (+9.6%) | 6.1 ± 0.9 | 6.6 ± 1.0 (+21.3%) | 0.773 ± 0.013 |
+
+**Reading:**
+
+1. **Content-dependence is real, and consistently signed** — every row shows TextVQA
+   rank ≥ COCO rank and TextVQA mean-cosine ≤ COCO mean-cosine, no exceptions across
+   8 conditions. COCO-only would have been a real methodological gap for the paper,
+   not just a defensible simplification.
+2. **The anchors are essentially insensitive to content** (62.7→62.0, 38.8→38.6,
+   flat within noise) — expected, since they're deterministic spatial averages
+   already near their 98% ceiling regardless of domain. There is no headroom left in
+   the anchor half for image content to modulate.
+3. **PARCEL's full-set content-sensitivity is smaller than the plain baseline's**
+   (+4.8%/−2.1% vs v4's +8.2%/−11.9%) — but the **query subset alone** still shows a
+   swing proportionally close to v4's own (+9.6% rank, +21.3% on the variance
+   metric). The queries have not lost their ability to respond to content; PARCEL's
+   architecture is suppressing their *absolute* level (§11's finding) while that
+   *responsiveness* survives underneath it.
+
+This directly informs §12's brainstorm: point 2 says routing effort toward the anchor
+half is wasted (no headroom to condition on); point 3 says the query half is where
+input-conditional capacity should go, and that fixing why it's suppressed should come
+before building a router to work around the suppression.
+
+## 12. Brainstorm: input-conditional anchor/query budget allocation (decision 20)
+
+Research only, per the user's explicit instruction — nothing below is implemented.
+The question: `n_anchors_for()` is currently a pure function of the *requested
+budget*, identical for every image. Could the anchor/query split — or the total
+budget itself — also condition on the *input*, using §11/§11a's rank measurements as
+the signal?
+
+**A. Cheap, non-learned router.** The frozen vision tower's raw patch embeddings are
+already computed before pooling; a statistic like patch-feature variance or mean
+pairwise patch dissimilarity is close to free (no new params, no extra forward pass)
+and is a plausible proxy for "how spatially complex is this image." Use it to
+interpolate `anchor_ratio` per image within a fixed total budget. §11a is the
+experiment that would tell you which direction to move the knob — and per point 2
+above, probably means moving budget INTO the query side for complex images, not the
+anchor side, since anchors have no headroom to use it.
+
+**B. Learned router.** Same idea as A, but the statistic-to-split mapping is a small
+gating head trained jointly, with a load-balancing auxiliary loss on realized FLOPs if
+average cost needs to stay bounded across a batch (standard MoE-style routing). More
+powerful, more moving parts, harder to debug than A.
+
+**C. Fix the mechanism before routing around it — highest priority per §11a.** The
+codebase already has an unused, directly-relevant piece:
+`ElasticConfig.use_token_decorrelation` / `losses.decorrelation_loss` ("penalize
+redundancy among retained query tokens"), off by default, never turned on in any run
+this session. §11's finding (PARCEL's queries collapse worse than baseline) plus
+§11a's finding (they're still content-responsive, just suppressed) together argue for
+trying this — on the query branch specifically — before B: a router only helps if the
+queries it allocates more budget to can actually use that budget to diversify, and
+right now that capability is demonstrably being left on the table.
+
+**D. Genuine adaptive total-budget elasticity (more ambitious).** Rather than only
+adapt the anchor/query split at a fixed total, let simple images use a smaller
+`tok_level` altogether and complex images use a larger one — real per-image adaptive
+compute, not a user-selected fixed level. Not a large architectural leap (the ladder
+already supports any `tok_level` on demand), but the decision policy is the hard part,
+and a low-budget pass's KV-cache is likely not reusable if escalation is triggered
+(the visual tokens differ in count and content), so escalation eating into the savings
+unless it's rare is a real risk, not just an implementation detail. Same family as
+SmolVLM's own content-adaptive image tiling and the broader adaptive-computation
+literature (early-exit, confidence-gated inference) — not compared against here.
+
+**Novelty**: NOT verified against the literature. PARCEL's own routing is
+budget-conditional only, not content-conditional, and I'm not aware of a paper doing
+input-conditional anchor/query allocation specifically — but that's an absence-of-
+search, not a checked claim, and should get the same literature pass the nested-LoRA
+question got (§6) before anything above is asserted as novel in a paper.
+
+## 13. Implementing mechanism C: query-branch decorrelation (decision 21)
+
+**It was dead code.** `ElasticConfig.use_token_decorrelation` / `decorr_weight` and
+`ElasticEngine.extra_losses` (which read them) have existed since early in the elastic
+engine's history, but `extra_losses` is never called anywhere — the real per-level
+training loop that actually accumulates CE/KL/CORAL is inlined directly in
+`llava_llama.forward` (`llava/model/language_model/llava_elastic_mixin.py`), and it
+never called `extra_losses` either. So `use_token_decorrelation=True` would have been a
+silent no-op in every run this session, not merely "off by default" — worth flagging
+since the config field's existence could otherwise be mistaken for "tried, didn't help."
+
+**What changed:**
+- `ElasticEngine.query_tokens_for_decorr(tokens, n_tok)` (`llava/model/elastic/engine.py`):
+  for `resampler_arch="pool_anchored"` slices off the leading anchor block (via the
+  same `n_anchors_for` the resampler itself uses, so the split always matches what that
+  forward pass actually produced — important because nested dropout can truncate a
+  non-teacher level below its nominal budget); for `resampler_arch="query"` it's a
+  no-op (every token is already a query). Directly implements §12 mechanism C's
+  "on the query branch specifically."
+- A real decorrelation term added to the per-level loop in `llava_elastic_mixin.py`,
+  gated on `cfg.use_token_decorrelation`, applied at **every** active level (teacher
+  included — collapse is a per-level property of the resampler output, not something
+  specific to distillation, unlike KL/CORAL which are inherently teacher/student
+  comparisons). Logged per-level as `loss/decorr_tok{N}` plus an aggregate
+  `loss/decorr`, health-checked like every other loss term.
+- `--use_token_decorrelation BOOL` (default `False`) and `--decorr_weight FLOAT`
+  (default `0.01`, matching `coral_weight`'s scale) added as CLI flags in
+  `train_elastic.py`, wired into the `ElasticConfig(...)` construction and the printed
+  config banner; `USE_TOKEN_DECORRELATION`/`DECORR_WEIGHT` env-var overrides added to
+  both `pretrain_elastic_slm.sh` and `finetune_elastic_slm.sh` (applied in both stages,
+  not just finetune, so the fix is present for all of warm-starting Stage 2, not
+  introduced only after the resampler is already partially trained collapsed).
+- Validated end-to-end before queuing anything: `jobs/test_decorr_loss.sh` (job 27337,
+  `ALL_TESTS_PASSED`) checks the anchor/query slice is correct in both resampler_arch
+  modes, that `decorrelation_loss` actually backprops a gradient, that a collinear
+  (collapsed) token set hits the loss's theoretical max (1.0) versus a random
+  full-rank set (0.242) — confirming the term responds in the right direction — and
+  that the new CLI flags parse with the correct default/override values.
+
+**The run.** v9 was still queued behind SigLIP (job 27324/27325, both still
+`PENDING(Resources)` — never started, no node ever allocated) when this landed. Since
+comparing decorrelation's effect against v4/v8-parcel (both CLIP) is a much cleaner
+read than compounding it with the SigLIP swap, cancelled 27324/27325 and requeued as
+**v9-parcel-decorr** (job 27338, eval 27339, `--array=0-7` matching the 8-level ladder):
+`--vision_tower` left unset so the launcher's own default (`openai/clip-vit-large-
+patch14-336`) applies — SigLIP was only ever an explicit override in the old
+submission, never the script default — `resampler_arch=pool_anchored`,
+`anchor_mode=ratio` (0.25, the decision-17 default), `use_token_decorrelation=True`,
+`decorr_weight=0.01`, same full ladder and LoRA ranks as v6/v8/the old v9
+(`576 512 448 384 256 144 64 16` / `2 4 6 8 8 16 32 64`). Queued behind whichever of
+node205/206/208 frees up first — all three were 96-97%+ through their current runs at
+queue time.
+
+**What this run should tell us, tied back to §11/§11a**: if mechanism C is doing what
+§12 argued, `debug/measure_token_rank.py`'s query-only rank on this checkpoint should
+land meaningfully above v8-parcel's 13.9%/26.7 — plausibly approaching or exceeding
+v4's plain-query 50.8%/130.0, since decorrelation pressure is now applied exactly
+where §11 found the collapse concentrated. Re-run the same measurement (COCO + TextVQA,
+full/anchor/query split) once a checkpoint exists, before drawing the paper table
+conclusion — this is a prediction from the brainstorm, not yet an observed result.
+
+## 14. Literature check on §12's novelty claim (decision 22)
+
+§12 flagged its own claim ("I'm not aware of a paper doing input-conditional
+anchor/query allocation") as an absence-of-search, not a checked one, and asked for
+the same literature pass the nested-LoRA question got (§6). Ran that pass. Caveat up
+front, same as §6: this is one search agent's pass, not a systematic review — treat
+the "genuine gap" read as a working hypothesis for the paper's positioning, not a
+settled claim, and independently re-verify every arXiv ID below before citing.
+
+**Found the actual base paper.** "PARCEL: Pool-Anchored Resampling with Conditioned
+Elastic Queries for Efficient Vision-Language Understanding" (arXiv:2605.30126, MPI-
+Informatik/Google/TUM authors) — fetched directly, not just search snippets. Confirms
+our own characterization exactly: anchor/query split is a **deterministic function of
+budget B alone** (4×4 pooled grid below B=64, 8×8 at B≥64, queries fill the
+remainder), identical across every image at a fixed B. Nothing in the paper does
+content-conditional routing, per-image budgets, or MoE-style gating. Good news for
+positioning: we now have the real paper to cite and contrast against directly, instead
+of arguing from our own reimplementation's behavior.
+
+**Adaptive TOTAL token count per image is a real, populated sub-area** — this axis is
+NOT open: LLaVA-PruMerge/PruMerge+ (arXiv:2403.15388, CLS-attention-outlier-driven
+count), HiRED (arXiv:2408.10945, AAAI 2025, attention-guided per-partition budget under
+a global cap), AVG-LLaVA (arXiv:2410.02745, learned router over discrete pooling
+granularities, conditioned on image **and instruction**), DOVE (arXiv:2506.03643,
+tokenizer length correlates with image complexity), Adaptive-VoCo (arXiv:2512.18496,
+patch-entropy/attention-dispersion-driven compression rate). By contrast PyramidDrop
+(arXiv:2410.17247) and the fixed-ratio pruning line (FastV, TokenPacker, VisionZip)
+apply the same schedule to every image regardless of content — not adaptive on this
+axis at all. This matters for how §12-mechanism-D ("genuine adaptive total-budget
+elasticity") gets framed in the paper: it should be positioned as re-deriving a known
+result in our own architecture, not as a novel contribution on its own.
+
+**The specific gap §12 cares about — content-conditioning the INTERNAL COMPOSITION of
+a fixed budget (anchor vs. query ratio within a hybrid pooled+learned resampler) —
+looks narrower but still real.** None of the adaptive-count papers above have a
+two-mechanism split to condition in the first place (they have one pooling/pruning
+mechanism whose total output size varies). The nearest actual precedent is **AVG-LLaVA**:
+a learned router picks among several discrete pooling *granularities* per image, which
+is routing, but over one mechanism, not a coarse/fine ratio within a hybrid — and it
+needs the text instruction alongside the image, whereas §12's mechanisms A-C are
+image-only. One flagged-as-unverified partial precedent: **PruMerge+** merges
+attention-selected tokens with a spatially-uniform grid complement, which structurally
+resembles an anchor+salient-token hybrid — but whether *that specific ratio* is itself
+content-adaptive (vs. just the total count) wasn't confirmed from search alone and
+needs a closer read before being cited either way. No paper was found doing MoE-style
+routing with a load-balancing loss specifically over token TYPE (pooled-anchor vs.
+cross-attended-query) — §12 mechanism B's closest literature analog — but this was a
+breadth-first pass, moderate rather than high confidence on that absence specifically.
+
+**Novelty verdict**: defensible as a paper claim, but narrower than "input-conditional
+budget allocation" in general (that part is not novel) — the honest framing is
+"content-conditioning the *composition* of a fixed budget inside a pool-anchored
+hybrid resampler specifically," positioned explicitly against AVG-LLaVA (nearest
+routing analog, single-mechanism + needs instruction) and against the adaptive-total-
+budget literature (orthogonal axis: those vary B, mechanisms A-C here fix B and vary
+its composition). A handful of very-recent 2026 arXiv-only hits (AsymVLM, OccamToken,
+COAST, E-AdaPrune) came from search snippets only, not fetched directly — treat as
+"worth checking before submission," not yet confirmed either way.

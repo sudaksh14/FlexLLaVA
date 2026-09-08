@@ -85,12 +85,33 @@ class ElasticConfig:
     #                     layout and fine-grained semantic details without an
     #                     underlying spatial anchor" -- our exact failure mode.
     resampler_arch: str = "query"
-    # budget -> number of pooled anchor tokens, for resampler_arch="pool_anchored".
-    # Must be a perfect square that divides the patch grid evenly (for a 24x24
-    # CLIP-L/14-336 grid: 1, 4, 9, 16, 36, 64, 144, 576). None -> derive ~25% of
-    # the budget, snapped down to the nearest valid grid. Anchor count MUST be
-    # monotone in budget: PARCEL's ablation shows a fixed anchor resolution
-    # across budgets costs ~5 points at the top of the range.
+    # How n_anchors_for() decides the anchor/query split, for
+    # resampler_arch="pool_anchored":
+    #   "ratio" (default) -- always ~anchor_ratio of the budget, computed for
+    #       ANY budget (declared or not) by snapping to the nearest reachable
+    #       anchor grid. What v8-parcel actually ran, just generalized: its
+    #       hand-picked table (256:64, 144:36, 64:16, 16:4) was already
+    #       exactly 25% at every entry, this makes that the rule instead of a
+    #       coincidence, so it needs no table at all and extends cleanly to
+    #       budgets a table was never given for (the full 576..16 ladder).
+    #   "fixed" -- PARCEL's own literal design: a step function over
+    #       anchor_routing (e.g. below 64 -> 16 anchors, 64..256 -> 64
+    #       anchors), constant within each declared band rather than scaling
+    #       continuously. Requires anchor_routing to be set.
+    anchor_mode: str = "ratio"
+    # Fraction of the budget spent on anchors in "ratio" mode. 0.25 is the
+    # value v8-parcel used at every declared level; not yet tested at other
+    # values.
+    anchor_ratio: float = 0.25
+    # budget -> number of pooled anchor tokens. In "ratio" mode this is
+    # OPTIONAL and only overrides specific budgets you've explicitly measured;
+    # in "fixed" mode it is REQUIRED (raises otherwise) and IS the routing
+    # table, looked up as a step function for undeclared budgets. Each value
+    # must be a perfect square that divides the patch grid evenly (for a 24x24
+    # grid: 1, 4, 9, 16, 36, 64, 144, 576) and monotone in budget -- PARCEL's
+    # own ablation shows a fixed anchor resolution across ALL budgets costs
+    # ~5 points at the top of the range, which is what "fixed" mode's step
+    # function is for testing deliberately, not what "ratio" mode does.
     anchor_routing: Optional[dict] = None
     # How the resampler picks its n_tok output tokens out of the query bank.
     # DEFAULT "prefix": the original, only-ever-run behaviour (queries[:n_tok],
@@ -130,6 +151,24 @@ class ElasticConfig:
     kl_teacher_tok_level: int = 0        # index into tok_levels (highest = full)
     n_sample_students: int = 0           # 0 = full grid; k>0 = teacher + k random students per step
     log_adapter_every: int = 0           # >0: log LoRA adapter divergence every N steps
+
+    def __post_init__(self):
+        # JSON has no integer dict keys -- json.dump on {256: 64, ...} and
+        # json.load back round-trips it as {"256": 64, ...}. Every reload of
+        # a saved elastic_config.json goes through ElasticConfig(**raw_dict),
+        # so anchor_routing silently gets string keys whenever it's
+        # reconstructed from disk rather than freshly constructed in Python.
+        # That breaks both int-keyed lookups in resampler.n_anchors_for
+        # ("fixed" mode's exact-match and step-function fallback both compare
+        # budgets as int) and raises TypeError the moment a comparison
+        # mixes an int value against a str key (hit measuring v8-parcel's
+        # checkpoint-4500, 2026-09-08: "'>' not supported between instances
+        # of 'int' and 'str'"). Every call site that reloads a checkpoint --
+        # lmms-eval's llava_elastic wrapper included -- goes through this
+        # constructor, so fixing it here fixes all of them at once rather
+        # than patching each reload site individually.
+        if self.anchor_routing is not None:
+            self.anchor_routing = {int(k): v for k, v in self.anchor_routing.items()}
 
     # ---- derived -------------------------------------------------------
     def tok_grid(self) -> List[int]:
