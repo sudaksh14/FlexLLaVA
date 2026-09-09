@@ -14,7 +14,7 @@ validated code path.
 
   python3 scripts/export_eval_csv.py [out.csv]
 """
-import csv, glob, json, os, sys
+import csv, glob, json, os, re, sys
 
 LOG_ROOT = "/var/scratch/skalra/flexllava/eval_logs"
 EFF_JSON = "results/efficiency_targets.json"
@@ -26,12 +26,28 @@ MODELS = {
     "llava-v1.5-7b-baseline":           ("LLaVA-1.5-7B (reference)", "Vicuna-7B-v1.5", "mlp2x_gelu (no compression)"),
     "baseline-tinyllama-576tok":        ("TinyLLaVA control (ours)", "TinyLlama-1.1B-Chat-v1.0", "mlp2x_gelu (no compression)"),
     "elastic-finetune-smollm2-v4":      ("FlexLLaVA-SmolLM2-1.7B", "SmolLM2-1.7B-Instruct", "elastic (nested resampler)"),
+    # v5 = v4 + rank-nested vision LoRA. Kept because it is the matched control
+    # for v8 (both vision-LoRA-on); on its own it is a REGRESSION against v4.
+    "elastic-finetune-tinyllama-v5":    ("FlexTinyLLaVA-1.1B (v5, vision-LoRA)", "TinyLlama-1.1B-Chat-v1.0", "elastic (nested resampler)"),
+    "elastic-finetune-smollm2-v5":      ("FlexLLaVA-SmolLM2-1.7B (v5, vision-LoRA)", "SmolLM2-1.7B-Instruct", "elastic (nested resampler)"),
+    # v6 = extended 576..16 ladder. Only its 576/512/448/384 levels exist so far,
+    # and those directory names were corrected on 2026-09-09 (see that run's
+    # README_RELABEL.txt) -- levels 0-3 had been written under the wrong labels.
+    "elastic-finetune-tinyllama-v6-tokrange": ("FlexTinyLLaVA-1.1B (v6, 576-16 ladder)", "TinyLlama-1.1B-Chat-v1.0", "elastic (nested resampler)"),
+    # v8 = PARCEL pool-anchored resampler. Current best elastic model.
+    "elastic-finetune-tinyllama-v8-parcel": ("FlexTinyLLaVA-1.1B (v8-parcel, BEST)", "TinyLlama-1.1B-Chat-v1.0", "elastic (PARCEL pool-anchored)"),
 }
 SUPERSEDED = ["llava-elastic-finetune", "llava-elastic-finetune-v3",
               "elastic-finetune-tinyllama", "elastic-finetune-tinyllama-v3",
               "llava-elastic-pretrain"]
 
-LEVEL_TOKENS = {"256tok": 256, "144tok": 144, "64tok": 64, "16tok": 16, "576tok-native": 576}
+# Derived from the directory name rather than enumerated: eval_lmms_level.sh
+# names each level after the checkpoint's own tok_levels entry, so an 8-level
+# ladder produces 576tok/512tok/448tok/384tok/... which a hardcoded 4-level map
+# would silently emit as a blank n_visual_tokens.
+def level_tokens(level):
+    m = re.match(r"(\d+)tok", level)
+    return int(m.group(1)) if m else ""
 METRICS = [("mme/mme_percetion_score", "mme_perception", 1),
            ("mme/mme_cognition_score", "mme_cognition", 1),
            ("pope/pope_accuracy", "pope_acc", 100),
@@ -54,7 +70,7 @@ for tag, (name, backbone, arch) in MODELS.items():
         flat = {f"{t}/{k.split(',')[0]}": v for t, d in res.items() if isinstance(d, dict)
                 for k, v in d.items() if isinstance(v, (int, float))}
         row = {"model": name, "backbone": backbone, "architecture": arch,
-               "tok_level": level, "n_visual_tokens": LEVEL_TOKENS.get(level, ""),
+               "tok_level": level, "n_visual_tokens": level_tokens(level),
                "checkpoint": tag, "run_dir": os.path.basename(os.path.dirname(found[-1]))}
         for key, col, sc in METRICS:
             v = flat.get(key)

@@ -44,8 +44,14 @@ Every decision below is the user's; the "result" column is what actually happene
 | 19 | Measure the visual-token rank story with real numbers (no pos-embed → pos-embed → PARCEL) for a paper section; also check whether raising vision-LoRA rank would help, and whether the current rank ladder has any grounding in the literature. | Measured (§11): pos-embed 130/256 (50.8%) vs the cited ~12/256 (4.7%); PARCEL splits into anchors 62.7/64 (98.0%, works as designed) vs queries 26.7/192 (13.9%, **worse** than the plain baseline, not better) — a real, non-obvious finding, written up with the caveat intact rather than only the flattering anchor number. LoRA-rank literature research done separately (not in the journal) — r=64 is defensible only as "above where sweeps go flat," not a validated optimum; one paper (LangVision-LoRA-NAS) suggests r=16 may be closer to a real sweet spot. Also found and fixed a real bug along the way: `anchor_routing`'s dict keys silently became strings on JSON reload (`ElasticConfig.__post_init__`), which would have broken v8-parcel's queued eval. |
 | 20 | Check whether the rank measurement is dataset-dependent (COCO vs a more general/detail-hungry set); brainstorm (research only, no implementation) using rank info to condition anchor/query budget allocation on the input. | Measured on TextVQA too (§11a): content-dependence is real and consistently signed across all 8 conditions checked — COCO alone would have been a real gap, not a defensible simplification. Anchors are content-insensitive (already at their ceiling); queries remain content-responsive even under PARCEL's suppressed baseline. Four mechanisms brainstormed (§12), with the existing-but-unused `decorrelation_loss` (mechanism C) argued as the right first move given what §11/§11a actually show, ahead of building any new router. |
 | 21 | Implement mechanism C (§12): wire up `use_token_decorrelation`/`decorr_weight`, off by default, applied to the QUERY tokens only. Turn it on for a new run using **CLIP**, not SigLIP, as the vision tower — a fair comparison against v4/v8-parcel (both CLIP), isolating the decorrelation effect from the SigLIP swap. | Implemented (§13). `engine.extra_losses` was dead code — the real per-level loop lives in `llava_elastic_mixin.py` and never called it, so `use_token_decorrelation` had literally never run despite existing on `ElasticConfig` since it was added. Wired a real per-level decorrelation term into that loop, added `ElasticEngine.query_tokens_for_decorr` (slices off the anchor prefix for `pool_anchored`, no-op for plain `query`), added `--use_token_decorrelation`/`--decorr_weight` CLI flags (unit-tested, job 27337, `ALL_TESTS_PASSED`). Cancelled the not-yet-started v9-siglip-parcel jobs (27324/27325 — still `PENDING(Resources)`, nothing lost) and requeued as **v9-parcel-decorr** (job 27338, eval 27339): CLIP vision tower (the launcher's own default — SigLIP was only ever an explicit override), `resampler_arch=pool_anchored`, `use_token_decorrelation=True`, same full ladder as v6/v8. |
-| 22 | Queue a final rank re-measurement (COCO + TextVQA) for v8-parcel once it actually finishes training, so §11/§11a's paper numbers are taken against the FINAL checkpoint, not the 96%-trained checkpoint-5000 snapshot. Separately, run a literature check on §12's novelty claim (input-conditional anchor/query allocation). | Rank re-measurement queued as job 27340, `--dependency=afterok:27303` (v8-parcel's training job) — fires automatically on completion, auto-detects whichever checkpoint `save_total_limit=1` leaves behind rather than hardcoding a step number. Literature check done (§14): found the actual paper "PARCEL" is based on, confirmed it is NOT content-adaptive either, found one close routing precedent (AVG-LLaVA) that narrows but does not eliminate the claimed gap. |
+| 22 | Queue a final rank re-measurement (COCO + TextVQA) for v8-parcel once it actually finishes training, so §11/§11a's paper numbers are taken against the FINAL checkpoint, not the 96%-trained checkpoint-5000 snapshot. Separately, run a literature check on §12's novelty claim (input-conditional anchor/query allocation). | v8-parcel finished training 2026-09-08 17:22 (5197/5197 steps, clean exit). Job 27340 ran automatically and measured the final checkpoint-5197 on both COCO and TextVQA — §11/§11a updated with the real final numbers, statistically indistinguishable from the checkpoint-5000 snapshot (every value moves by less than its own std), so all three prior readings stand unchanged; these are now the paper-final figures. Literature check done (§14): found the actual paper "PARCEL" is based on, confirmed it is NOT content-adaptive either, found one close routing precedent (AVG-LLaVA) that narrows but does not eliminate the claimed gap. |
 | 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
+| 24 | Cluster-wide reboot (all 8 nodes down) interrupted v7-kd7b mid-training and truncated v6-tokrange's eval to 4/8 levels. Cancel v7-kd7b and its eval outright; requeue the missing v6-tokrange levels with the script bug fixed; resize v9-parcel-decorr to fit on A10 (node208) instead of A40 (node205) so node205 stays free; write up the backbone/PARCEL/decorr ablation matrix that doesn't fit locally as a pending-work list for the other ("hipster") cluster. | Done (§15). Found and fixed a real bug in `eval_lmms_level.sh` along the way: `jq`'s availability is inconsistent across compute nodes, so 4 of 8 v6-tokrange eval array tasks silently fell back to a wrong 4-level default and errored out even though `elastic_config.json` was present and correct the whole time — replaced with a `python3`-based parse (env-guaranteed) and a loud failure instead of a silent wrong-grid fallback. v7-kd7b (27299) + its eval (27300) cancelled; v6-tokrange's missing levels (576/512/448/384-token) requeued as job 27375 `--array=4-7`. v9-parcel-decorr requeued as job 27376/27377 with `--gres=gpu:A10:2` (was A40:2) — justified by v8-parcel, the identical architecture minus the decorrelation term, having already completed its full 84.5h run cleanly on node208's A10:2. |
+| 25 | Analyse v6's available eval levels and v8 against the earlier runs and say whether any introduced change actually helped; record the outcome; make **v8 the best working model**; drop rank-nested vision LoRA from all future runs including v9; queue **v10** with vision LoRA fixed at 16 for both stages; re-scope the hipster matrix to the v8 setup with vision LoRA off, stating in that section that v8 is the best-performing config and that vision LoRA is off; rename v6's eval folders correctly and verify the pending evals land in the right ones. | Done (§16). **Yes, one change helped: PARCEL (v8) — the only run with a real budget–accuracy gradient, and the new best model (§16c).** The other two introduced changes lost: rank-nested vision LoRA is a regression on both backbones (§16d, default now False), and the extended 576→16 ladder is a large regression (§16b, retired). Found along the way that §15b's root cause was recorded backwards: *every* task of job 27292 hit the `jq` fallback, so v6's four surviving results were not 256/144/64/16 at all but 576/512/448/384 written under the wrong labels — verified against the measured prefill FLOPs and relabelled (§16a). v9 cancelled and re-scoped onto v8's grid with LoRA off; v10 added; v11 deferred by decision; recipes moved out of submitting-shell env vars into `submit_elastic_run.sh` (+ a `docs/SUBMITTED_RUNS.tsv` job-id→recipe log) in git, after v9's ladder had to be recovered from circumstantial evidence. v9 requeued as 27378/27379 and v10 as 27380/27381, both `--array=0-3`; all 8 nodes were still `down` at submit time, so neither has started. |
+| 29 | Restrict the v6 eval job to node206/207 so it does not interfere with the training runs. | Done via `scontrol update jobid=27375 ReqNodeList=node206,node207` — applied to all four pending array tasks at once (§16a). Those are the two single-GPU nodes; the eval only asks for `gpu:1`, but without the pin it could take node205 or node208 and block an `--exclusive` training job for a whole benchmark sweep. Scores are unaffected — the only GPU-type branch in the eval path is its batch size (A40 → 8, A10 → 4), which is throughput. The three queued evals (27383/27385/27387) are **not** pinned: they are dependency-held behind their own training jobs, so by the time they release, the node those jobs occupied is free anyway. |
+| 28 | Put v11 into the hipster pipeline too, and add a new **v12** there: v11's setup plus the 7B-teacher KD. Update the journal. | Done (§16f). The hipster ports are now stated as **v11 verbatim with a different `SLM_KEY`**, not a separate design — `ELASTIC_RUN_TAG` stays `v11-parcel-nolora` while the checkpoint path interpolates the backbone, so each lands in its own directory and the local TinyLlama v11 (27386) is the shared reference point. **v12-parcel-kd7b** added to `submit_elastic_run.sh`: `TEACHER=llava` on top of v11, superseding v7-kd7b (§15d), which asked the same question from the superseded v4-era setup. Two constraints made enforceable rather than documentary: the recipe **exits 1 up front** if `SLM_KEY` is not a Llama-32000 backbone (`attach_kd_teacher` would otherwise raise only after Stage 1 had run, and this excludes smollm2/qwen*/phi2 — three of the five matrix rows, leaving `mobilellama` as the only eligible hipster backbone), and it raises its own `DEFAULT_GRES` to A40-class for the frozen 7B's unsharded ~14 GB/GPU. `GRES` is now overridable per submission so these recipes can run on hipster's card names. Neither is queued locally: v12 is A40-only and would be a fourth exclusive job against two eligible nodes, which is the contention §15d moved this work off-cluster to avoid. |
+| 27 | Queue v11 as well; stop pinning jobs to a GPU type — request 2 GPUs so runs can land on either node205 (A40:2) or node208 (A10:2) instead of stacking on one node. | Done. **v11-parcel-nolora** (PARCEL, decorrelation off, vision LoRA off) queued as 27386/27387 — the control v8 never had, and what makes v9 and v10 attributable (§16e). All three runs resubmitted with untyped `--gres=gpu:2`: node205 and node208 are the only 2-GPU nodes in `defq` (206/207 have one each), so `gpu:2` resolves to exactly those two. Checked before switching that this cannot silently change results — nothing in the training path branches on GPU type (`per_device_train_batch_size` is a constant in both stages, `NUM_GPUS` defaults to 2), so a run is identical on A40 and A10. Final ids: v9 27382/27383, v10 27384/27385, v11 27386/27387, all `--array=0-3`, all still pending on the outage. Also fixed a bug in `submit_elastic_run.sh`'s own log: the header guard tested `-f` rather than `-s`, so a truncated log would never regain its header. |
+| 26 | Ask whether "vision LoRA always hurts" is safe to claim in the paper. Make v9's configuration the default for all future experiments **if** v9 improves on v8. | **Pushed back on the first: no, it is not safe (§16d "Scope limit").** Audited `use_lora` across every checkpoint — **v8, the best model in the project, has vision LoRA ON**, as does v6. The only controlled A/B on the flag is v4 vs v5, both on the plain `query` resampler; under PARCEL, vision-LoRA-off has never been run. The literature is mixed rather than unanimous (Prismatic VLMs supports it but for *full fine-tuning*; Qwen-VL/InternVL/Idefics2 adapt the vision encoder deliberately), and no §6/§14-style search pass has been run on this question. Proposed a scoped claim about the *nested per-level* mechanism instead of the component. The v9 conditional is recorded as a standing decision (§16g) — not actionable yet, since v9 has not started, and flagged as needing v11 first because v9 differs from v8 by **two** flags, not one. |
 
 ## 2. The Otter arc (decisions 1–4)
 
@@ -655,9 +661,9 @@ the reliable part, not bit-for-bit comparability with the historical figure.
 |---|---|---:|---:|---:|---:|
 | **no positional embeddings** (job 26568, TinyLlama, *cited — checkpoint no longer exists*) | pure queries | **~12 / 256** | — | — | **0.91** |
 | **positional embeddings on** (v4, measured this session, n=24 imgs) | pure queries | 130.0 ± 13.8 / 256 (50.8%) | 37.2 ± 5.4 (14.5%) | 57.2 ± 5.5 (22.3%) | 0.672 ± 0.028 |
-| **PARCEL spatial anchors** (v8-parcel, checkpoint-5000, 96% trained, n=24 imgs) — **full set** | 64 anchors + 192 queries | 44.0 ± 4.7 / 256 (17.2%) | 7.8 ± 1.0 (3.0%) | 10.4 ± 1.9 (4.1%) | 0.521 ± 0.011 |
-| PARCEL — **anchors only** | 64 deterministic pooled | 62.7 ± 0.9 / 64 (**98.0%**) | 40.5 ± 5.5 (63.3%) | 38.8 ± 3.3 (60.5%) | 0.515 ± 0.049 |
-| PARCEL — **queries only** | 192 pool-conditioned learned | 26.7 ± 2.0 / 192 (**13.9%**) | 5.1 ± 0.4 (2.7%) | 5.5 ± 0.8 (2.8%) | 0.784 ± 0.012 |
+| **PARCEL spatial anchors** (v8-parcel, **checkpoint-5197, FINAL**, n=24 imgs) — **full set** | 64 anchors + 192 queries | 43.8 ± 4.5 / 256 (17.1%) | 7.7 ± 1.1 (3.0%) | 10.3 ± 1.8 (4.0%) | 0.521 ± 0.011 |
+| PARCEL — **anchors only** | 64 deterministic pooled | 62.6 ± 1.1 / 64 (**97.9%**) | 40.3 ± 5.6 (63.0%) | 38.7 ± 3.3 (60.4%) | 0.516 ± 0.049 |
+| PARCEL — **queries only** | 192 pool-conditioned learned | 26.8 ± 1.8 / 192 (**13.9%**) | 5.1 ± 0.6 (2.7%) | 5.5 ± 0.6 (2.9%) | 0.784 ± 0.013 |
 
 **Reading, in order:**
 
@@ -704,13 +710,19 @@ more precise and more defensible claim for the paper than "PARCEL improves token
 diversity."
 
 **Caveats**: single checkpoint per condition (no seed variance across independent
-training runs); v8-parcel measured at 96% trained (checkpoint-5000 of 5197 steps, the
-current checkpoint at measurement time — `save_total_limit=1` rotates old ones away,
-so this is whatever was latest, not a chosen point, and the number should be re-taken
-against the final checkpoint once training completes for paper-final figures). v4 and
-PARCEL *were* measured on the identical 24 COCO images (both runs used the script's
-default `--seed 0`, so the same `random.sample` draw) — the comparison is apples to
-apples on that axis at least.
+training runs). v4 and PARCEL *were* measured on the identical 24 COCO images (both
+runs used the script's default `--seed 0`, so the same `random.sample` draw) — the
+comparison is apples to apples on that axis at least.
+
+**Update (decision 22, job 27340): re-measured against the FINAL checkpoint
+(checkpoint-5197 of 5197, training completed 2026-09-08) once v8-parcel actually
+finished.** The table above now shows the final numbers directly. They are
+statistically indistinguishable from the checkpoint-5000 (96%-trained) numbers this
+section originally reported — full-set rank@1% 44.0→43.8, anchors 62.7→62.6, queries
+26.7→26.8, every other column moves by less than its own std — so the mid-training
+snapshot was already representative and none of the three readings above change. The
+"should be re-taken against the final checkpoint" caveat is resolved; these are the
+paper-final figures for v8-parcel.
 
 ### 11a. Does rank depend on the dataset? (decision 20) — yes, checked, not assumed
 
@@ -726,12 +738,12 @@ if it existed anywhere.
 |---|---|---:|---:|---:|---:|
 | v4 — full (pure queries) | COCO | 130.0 ± 13.8 | 37.2 ± 5.4 | 57.2 ± 5.5 | 0.672 ± 0.028 |
 | v4 — full | **TextVQA** | **140.7 ± 13.7** (+8.2%) | 39.8 ± 5.9 | 64.8 ± 6.9 (+13.3%) | **0.592 ± 0.059** (−11.9%) |
-| PARCEL — full | COCO | 44.0 ± 4.7 | 7.8 ± 1.0 | 10.4 ± 1.9 | 0.521 ± 0.011 |
-| PARCEL — full | TextVQA | 46.1 ± 5.6 (+4.8%) | 8.0 ± 1.4 | 11.0 ± 2.1 (+5.8%) | 0.510 ± 0.013 (−2.1%) |
-| PARCEL — anchors only | COCO | 62.7 ± 0.9 | 40.5 ± 5.5 | 38.8 ± 3.3 | 0.515 ± 0.049 |
-| PARCEL — anchors only | TextVQA | 62.0 ± 2.4 (≈0%) | 41.3 ± 9.2 | 38.6 ± 6.1 (≈0%) | 0.490 ± 0.047 |
-| PARCEL — queries only | COCO | 26.7 ± 2.0 | 5.1 ± 0.4 | 5.5 ± 0.8 | 0.784 ± 0.012 |
-| PARCEL — queries only | TextVQA | 29.25 ± 2.4 (+9.6%) | 6.1 ± 0.9 | 6.6 ± 1.0 (+21.3%) | 0.773 ± 0.013 |
+| PARCEL — full (**FINAL, checkpoint-5197**) | COCO | 43.8 ± 4.5 | 7.7 ± 1.1 | 10.3 ± 1.8 | 0.521 ± 0.011 |
+| PARCEL — full | TextVQA | 45.9 ± 5.9 (+4.7%) | 8.0 ± 1.4 | 11.2 ± 2.1 (+9.0%) | 0.510 ± 0.013 (−2.1%) |
+| PARCEL — anchors only | COCO | 62.6 ± 1.1 | 40.3 ± 5.6 | 38.7 ± 3.3 | 0.516 ± 0.049 |
+| PARCEL — anchors only | TextVQA | 62.0 ± 2.4 (≈0%) | 41.3 ± 9.2 | 38.75 ± 6.1 (≈0%) | 0.490 ± 0.046 |
+| PARCEL — queries only | COCO | 26.8 ± 1.8 | 5.1 ± 0.6 | 5.5 ± 0.6 | 0.784 ± 0.013 |
+| PARCEL — queries only | TextVQA | 29.3 ± 2.6 (+9.3%) | 6.2 ± 0.9 | 6.8 ± 1.0 (+22.6%) | 0.773 ± 0.013 |
 
 **Reading:**
 
@@ -853,7 +865,15 @@ patch14-336`) applies — SigLIP was only ever an explicit override in the old
 submission, never the script default — `resampler_arch=pool_anchored`,
 `anchor_mode=ratio` (0.25, the decision-17 default), `use_token_decorrelation=True`,
 `decorr_weight=0.01`, same full ladder and LoRA ranks as v6/v8/the old v9
-(`576 512 448 384 256 144 64 16` / `2 4 6 8 8 16 32 64`). Queued behind whichever of
+(`576 512 448 384 256 144 64 16` / `2 4 6 8 8 16 32 64`).
+
+*(Corrected 2026-09-09: "same full ladder and LoRA ranks as v6/v8" is wrong about v8.
+`elastic-finetune-tinyllama-v8-parcel/elastic_config.json` is the **4-level**
+`256 144 64 16` / `8 16 32 64` grid — the same one v4 and v5 use. Only v6 and v9 were
+ever on the 8-level ladder. v9 has since been moved onto v8's 4-level grid; see
+§16e.)*
+
+Queued behind whichever of
 node205/206/208 frees up first — all three were 96-97%+ through their current runs at
 queue time.
 
@@ -923,3 +943,532 @@ budget literature (orthogonal axis: those vary B, mechanisms A-C here fix B and 
 its composition). A handful of very-recent 2026 arXiv-only hits (AsymVLM, OccamToken,
 COAST, E-AdaPrune) came from search snippets only, not fetched directly — treat as
 "worth checking before submission," not yet confirmed either way.
+
+## 15. Cluster outage cleanup, and pending experiments for the other cluster (decision 24)
+
+### 15a. What happened
+
+2026-09-08, sometime after v8-parcel's rank remeasurement (job 27340) landed: all 8
+local nodes (node201-208) went `down` simultaneously — SLURM reasons "Node
+unexpectedly rebooted" / "Not responding". Infrastructure event, not a job or code
+issue; nothing runnable locally until nodes come back. Damage assessment:
+
+- **v8-parcel (27303)**: unaffected — finished cleanly *before* the outage (§11 update
+  above).
+- **smollm2-v5 finetune (27282) + eval (27283)**: unaffected — both completed before
+  the outage, all 4 eval levels present.
+- **v6-tokrange finetune**: unaffected, completed. Its **eval (27292, `--array=0-7`)
+  did not** — only levels 0-3 finished, and per the correction in §15b those are the
+  **576/512/448/384**-token levels, not the 256/144/64/16 ones their directory names
+  claimed. Levels 4-7 — the real 256/144/64/16 — failed immediately with a wrong-grid
+  error, unrelated to the outage itself: a **pre-existing bug**, just noticed while
+  triaging. v6-tokrange has still never been evaluated at 256 tokens or below.
+- **v7-kd7b (27299)**: caught mid-training (step ~1046/5197, epoch 0.2) when its node
+  rebooted. Last checkpoint saved was `checkpoint-1000`, so ~46 steps since the last
+  save were lost — recoverable, but per decision 24 this run is being **cancelled
+  outright here**, not resumed (see §15c for why, and where it might resume instead).
+
+### 15b. Bug fixed: `eval_lmms_level.sh`'s `jq` dependency was node-inconsistent
+
+The script read `tok_levels` from the checkpoint's `elastic_config.json` via `jq`,
+falling back to a hardcoded 4-level list `(256, 144, 64, 16)` if the file or `jq`
+looked missing. `elastic_config.json` was present and correct (all 8 levels) the
+entire time. Root cause: `jq`'s availability is not a per-job
+constant — it depends on which physical node the SLURM array task lands on, and at
+least one node in the pool doesn't have it wired onto the PATH the job script sees
+that early (before `module load`/`conda activate`, which the check ran ahead of).
+
+**CORRECTION (2026-09-09).** The first version of this section said "array tasks 0-3
+read it fine, tasks 4-7 hit the fallback." That is backwards, and the difference
+matters. **Every** array task of job 27292 hit the fallback —
+`jobs/eval_lmms_27292_tok0.out` carries the same "falling back to the default 4-level
+label list" warning that tok4-7 do. Tasks 4-7 then errored, loudly, because index
+≥4 does not exist in a 4-entry list. Tasks 0-3 did something worse: they indexed
+*successfully* into the wrong list and produced four complete, correct-looking result
+sets under **wrong labels**. They evaluated `tok_level` 0/1/2/3 of an 8-level ladder
+— i.e. **576/512/448/384 tokens** — and wrote them into directories named
+`256tok/144tok/64tok/16tok`. The loud half of this bug cost four eval tasks; the
+silent half nearly cost a wrong paper table, since nothing downstream re-derives the
+token count from anything but the directory name. The relabelling is §16a.
+
+Fixed by moving `module load`/`conda activate` to the top of the script and reading
+`tok_levels` with `python3 -c "import json; ..."` instead of `jq` — the same
+interpreter the script already depends on unconditionally a few lines later (base-LLM
+detection) — and by making a missing/unparseable config a **loud failure** rather than
+a silent wrong-grid fallback, so this class of bug fails fast next time instead of
+quietly producing 4 fewer results. v6-tokrange's missing levels requeued as job 27375
+`--array=4-7` with the fixed script.
+
+### 15c. v9-parcel-decorr resized to fit A10, kept local
+
+v9-parcel-decorr's original submission inherited `run_job_slm.sh`'s hardcoded
+`--gres=gpu:A40:2` default, i.e. node205-only. v8-parcel — architecturally identical
+(`resampler_arch=pool_anchored`, same full ladder, same LoRA ranks) minus the
+decorrelation term, which adds no new parameters and a single scalar loss — completed
+its entire 84.5-hour run cleanly on node208's **A10:2** with no OOM. That's direct
+evidence A10 has headroom for this exact config, so v9-parcel-decorr was resubmitted
+with `--gres=gpu:A10:2` (job 27376/27377) instead, freeing node205's A40s for other
+work rather than contending for the scarcer resource unnecessarily.
+
+### 15d. v7-kd7b: cancelled here, candidate for the other ("hipster") cluster
+
+v7-kd7b's whole point (§5b, decision 13) is a frozen **external LLaVA-1.5-7B** KD
+teacher — the self-distillation default measured a KL of ~0.006 (teacher and student
+are literally the same weights on informationally-equivalent inputs, nothing to
+distill), so `teacher=llava` is the only way this codebase's KD term could carry real
+signal. That question is still open and still worth answering, but continuing to
+contend for the same 4 local A10/A40 nodes already saturated by
+smollm2-v5/v8-parcel/v6-tokrange/v9-parcel-decorr — on top of today's reminder that
+the local cluster's uptime is not guaranteed — makes it a better fit for the other
+("hipster") cluster than for a fifth slot in the local queue. **Resume point**:
+`elastic-finetune-tinyllama-v7-kd7b/checkpoint-1000` is intact (5 checkpoints of
+progress, `save_total_limit=1` so only the latest survives) — the exact same
+`run_job_finetune_slm.sh tinyllama` invocation with `TEACHER=llava` will resume from
+it rather than restart. Needs an A40-class GPU (or better): the frozen 7B teacher costs
+~14 GB/GPU on top of the student, and `attach_kd_teacher` is a plain attribute (not a
+submodule), so ZeRO does **not** shard it — verify VRAM headroom on whatever hipster
+GPU is targeted before assuming node205's A40 numbers transfer directly.
+
+### 15e. Proposed backbone × PARCEL ablation matrix for hipster
+
+> **RECIPE SUPERSEDED 2026-09-09 — read this before using the table below.**
+> The rows (which backbones, and why) still stand. The **recipe they inherit does
+> not**. Every row runs the **v11 recipe** — the v8-parcel configuration, which is
+> the best-performing setup in the project (§16c), with vision LoRA OFF (§16d) — *not*
+> the v9 recipe this section originally specified. A second run per backbone,
+> **v12**, adds the frozen 7B KD teacher on top of that; it is Llama-vocab only.
+> See §16f.
+>
+> ```
+> TOK_LEVELS="256 144 64 16"     LORA_RANKS="8 16 32 64"
+> STAGE1_TOK_LEVEL=256           STAGE1_LORA_RANK=64
+> RESAMPLER_ARCH=pool_anchored   ANCHOR_MODE=ratio   ANCHOR_RATIO=0.25
+> VISION_LORA_ENABLE=False       USE_TOKEN_DECORRELATION=False
+> VISION_TOWER=openai/clip-vit-large-patch14-336      TEACHER=self
+> ```
+>
+> Three things changed from what is written below, each for a measured reason:
+> **(1)** the ladder is v8's 4-level `256 144 64 16`, not the 8-level `576…16` — that
+> ladder is a large regression (§16b) and is retired; **(2)** vision LoRA is **off** —
+> rank-nested vision LoRA lost on both backbones it was tried on (§16d), so it is off
+> by default now and these ports inherit that; **(3)** decorrelation is **off** —
+> v9 has not reported yet, and an unvalidated loss term in every backbone port would
+> confound the backbone comparison. Details and the revised sequencing: **§16f**.
+
+Brainstormed, not yet decided or run anywhere — flagging as a candidate work list per
+the user's ask, prioritized by what each run would actually tell us. The original text
+below reused v9's then-current recipe (`resampler_arch=pool_anchored`,
+`anchor_mode=ratio` @0.25, `--use_token_decorrelation True --decorr_weight 0.01`, CLIP
+vision tower, the full `576 512 448 384 256 144 64 16` ladder / `2 4 6 8 8 16 32 64`
+LoRA ranks) so every run would be a direct extension of v9; per the banner above it is
+now a direct extension of **v11** instead. Kept as written, with the one row whose
+rationale the change invalidates marked inline.
+
+**v12 eligibility** (the KD arm, §16f): `mobilellama` is the **only** row here that can
+run it — every other backbone fails the Llama-32000 vocab requirement the frozen
+LLaVA-1.5-7B teacher imposes, and `tinyllama`, which also qualifies, is not in this
+table because it runs locally.
+
+| Backbone | `LLM_KEY` | Conv template | Existing local baseline? | Why this one |
+|---|---|---|---|---|
+| MobileLLaMA-1.4B-Chat | `mobilellama` | `v1` | **none** — never run through the elastic pipeline at all, only used as an external reference point (§9c's peak-memory/FLOPs comparison against the *original* MobileVLM). | Directly comparable against that same §9c reference architecture if it's ever run at all; also the smallest-vocab Llama-family option after TinyLlama, so `teacher=llava` KD stays available if v7-kd7b's question is revisited on the same backbone family. |
+| Qwen2.5-0.5B-Instruct | `qwen0.5b` | `chatml` | **none** — untested even at the plain v4/v5 baseline level in this codebase. | Smallest LLM in the whole family: ~~tests whether decorrelation's benefit (or the underlying collapse it's fixing) scales with LLM capacity~~ — **decorrelation is off in the revised recipe**, so this row's question is now whether **PARCEL's** benefit scales with LLM capacity. The logic carries over unchanged: a tiny LLM has the least room to compensate for redundant visual tokens, so this is the sharpest test of whether the resampler fix matters downstream and not just on the rank metric. **Caveat**: needs its own v4-equivalent baseline run first (or alongside) — there is no existing Qwen accuracy number in this codebase to compare against, plain rank numbers alone won't show the accuracy story. |
+| Qwen2.5-1.5B-Instruct | `qwen1.5b` | `chatml` | **none** | Mid-size point on the same curve as above; also a non-Llama-vocab backbone, so exercises the `teacher=self` KD path (the only option — `teacher=llava` requires Llama-32000 vocab) under ~~PARCEL+decorr~~ **PARCEL**, which hasn't been combined before. |
+| Phi-2 | `phi2` | `phi` | **v4 exists** (`elastic-finetune-phi2-v4`, evaluated) — a real accuracy baseline to compare against, unlike the two Qwen rows. | Completes a third full backbone comparison (alongside TinyLlama and, once run, SmolLM2) with an actual pre-PARCEL accuracy number already in hand; also the backbone flagged in §9c as having an unreliable FLOPs split measurement (`FlopCounterMode` likely undercounting Phi-2's fused attention) — a second look at that gap wouldn't hurt if this run happens anyway. |
+| SmolLM2-1.7B-Instruct | `smollm2` | `chatml` | **v4 AND v5 exist**, both evaluated. | Cheapest of these five to justify, and still the one to run first — but ~~reuses an already-proven-working local recipe (v5 already turned vision LoRA on for this backbone)~~ **is wrong as of §16d**: SmolLM2 v5 is a *regression* against its own v4 (SciQA −9.9, MME −38.8, TextVQA −3.4), so v5 is the wrong thing to build on. Corrected rationale: with vision LoRA off, **SmolLM2's v4 is already the matched baseline** for a PARCEL port, making `smollm2` v4 → v8-setup a clean single-change comparison and the cheapest real result available on that cluster. |
+
+**Sequencing suggestion** (not a commitment): SmolLM2 first (cheapest to de-risk, reuses
+existing recipe + baseline), then Phi-2 (real accuracy baseline already exists), then
+the Qwen pair (need their own v4 baseline alongside, more setup cost), then
+MobileLLaMA (least existing scaffolding). v7-kd7b (§15d) is a separate question — same
+cluster, but orthogonal to this matrix (KD-signal strength, not PARCEL/decorr) — don't
+conflate its results with this table's.
+
+## 16. v6 and v8 results, and the vision-LoRA verdict (decision 25)
+
+### 16a. v6-tokrange's eval directories were relabelled
+
+Per the correction in §15b, job 27292's four surviving array tasks evaluated
+`tok_level` 0-3 of v6-tokrange's 8-level ladder — **576/512/448/384 tokens** — under
+directory names taken from the 4-level `jq` fallback. Renamed on 2026-09-09 to what
+was actually measured:
+
+| directory (was) | directory (now) | `tok_level` | real budget |
+|---|---|---|---|
+| `256tok/` | `576tok/` | 0 | 576 |
+| `144tok/` | `512tok/` | 1 | 512 |
+| `64tok/`  | `448tok/` | 2 | 448 |
+| `16tok/`  | `384tok/` | 3 | 384 |
+
+The inner `*_elastic_<label>_*` run directories were renamed to match; **file contents
+were never touched and were always correct** — only the labels were wrong. A
+`README_RELABEL.txt` next to them records this in place, for anyone who finds the
+directory without the journal.
+
+Confirmed independently of the log warning, by the measured prefill FLOPs, which are
+computed from the actual forward pass and not from any label: the run now under
+`576tok/` reports **1.315 TFLOPs**, against **0.639** for a genuine 256-token TinyLlama
+run (`elastic-finetune-tinyllama-v4/256tok`). A linear fit through v4's four levels
+predicts 1.283 TFLOPs at 576 tokens — the relabelled values land within ~2.5% of that
+fit at all four points, and nowhere near the 4-level labels they carried.
+
+Two follow-ups so this cannot recur silently:
+
+- `scripts/export_eval_csv.py`'s `LEVEL_TOKENS` was a hardcoded 4-entry dict, so it
+  would have emitted a **blank** `n_visual_tokens` for every one of the renamed
+  directories. Replaced with a `level_tokens()` that parses the digits out of the
+  directory name, so any ladder works.
+- The pending eval arrays were checked against their **submitted** batch scripts
+  (`scontrol write batch_script`), not the working tree — SLURM snapshots the script
+  at submit time, and the `jq` fix is still uncommitted. Both **27375** (v6-tokrange,
+  `--array=4-7`) and the v9 eval carry the fixed `python3` parse and the loud-failure
+  path, so their output directories will be named correctly.
+
+**27375 pinned to the single-GPU nodes (2026-09-09).** The eval array requests
+`gpu:1`, but nothing stopped it landing on node205 or node208 — the only two-GPU
+nodes, and the only ones v9/v10/v11 can run on. A one-GPU eval taking one of those
+would block an `--exclusive` training job for the length of a full benchmark sweep.
+Restricted in place with `scontrol update jobid=27375 ReqNodeList=node206,node207`
+(A40:1 and A10:1 respectively — the two single-GPU nodes), which applies to all four
+pending array tasks at once. No effect on the numbers: `eval_lmms_level.sh` picks its
+eval batch size by card (A40 → 8, A10 → 4), which changes throughput, not scores.
+
+### 16b. v6-tokrange: extending the ladder to 576 tokens failed
+
+Only the top four levels exist; 256/144/64/16 are still queued as job 27375.
+
+| tokens | MME-P | POPE-acc | POPE-F1 | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|---|
+| 576 | 1042.73 | 80.46 | 79.05 | 47.50 | 14.81 | 50.66 |
+| 512 | 1043.50 | 79.78 | 78.04 | 47.35 | 14.51 | 50.33 |
+| 448 | 1035.22 | 79.98 | 78.40 | 47.10 | 14.35 | 50.29 |
+| 384 | 1038.28 | 80.09 | 78.59 | 47.10 | 14.63 | 50.22 |
+| *dense 576 baseline* | *1248.32* | *84.89* | *83.28* | *57.36* | *41.00* | *58.30* |
+
+At **576 tokens — the same count the uncompressed baseline uses**, so the resampler is
+not compressing anything — v6 gives up 26.2 points of TextVQA, 9.9 of SciQA, 7.6 of
+GQA and 206 of MME against that baseline. It is also worse than **v4 at 16 tokens** on
+TextVQA (14.81 vs 19.90) and MME (1042.7 vs 1116.4), i.e. worse than the same
+architecture on the short ladder using 36× fewer visual tokens.
+
+And the four levels are flat to within noise — TextVQA spread 0.46, GQA 0.44, SciQA
+0.40 across a 1.5× change in budget. This is the [token-budget-has-no-effect] pattern
+again — the same "16 tokens ≈ 256 tokens" result that made the prefix-KL ~0 — now
+observed at the *top* of the ladder, where a gap should be easiest to produce.
+
+The most likely mechanism is the LoRA ranks the extended ladder forced. Keeping the
+ranks ascending with budget descending put ranks `2 4 6 8` on the four high-budget
+levels, versus `8 16 32 64` for the same architecture on the short ladder. Stated as a
+hypothesis, not a measured cause — separating "576 tokens is bad" from "rank 2 is bad"
+would need a run at 576 with a large rank, which nothing on the roadmap currently does.
+
+**Consequence:** the 8-level 576→16 ladder is retired. v9 was on it and has been moved
+to v8's 4-level grid (§16e).
+
+### 16c. v8-parcel: the first change that improved anything, and the new best model
+
+**`elastic-finetune-tinyllama-v8-parcel` is the best model in the project** —
+`resampler_arch=pool_anchored` (PARCEL), `anchor_routing` 64/36/16/4 (the 25% ratio
+from decision 17), on the standard `256 144 64 16` grid with ranks `8 16 32 64`.
+
+The correct control is **v5**, not v4: v8 and v5 share the grid, the LoRA ranks and
+`use_lora: true`, and differ only in `resampler_arch`. v4 had vision LoRA off, so
+v8-vs-v4 confounds PARCEL with the vision-LoRA flag and *understates* PARCEL, because
+that flag is itself a regression (§16d).
+
+| tokens | vs **v5** (matched control) | vs **v4** |
+|---|---|---|
+| 256 | MME **+134.7**, POPE-acc **+4.95**, TextVQA **+9.91**, GQA **+5.16**, SciQA −1.24 | MME +56.8, POPE +2.76, TextVQA +5.32, GQA +3.72, SciQA −3.17 |
+| 144 | MME +95.4, POPE +4.50, TextVQA +7.93, GQA +4.52, SciQA −1.24 | MME +35.8, POPE +2.29, TextVQA +3.29, GQA +3.31, SciQA −3.27 |
+| 64 | MME +126.0, POPE +3.91, TextVQA +5.55, GQA +3.86, SciQA −1.43 | MME +70.5, POPE +1.14, TextVQA +1.11, GQA +2.52, SciQA −4.06 |
+| 16 | MME +83.7, POPE +1.60, TextVQA +1.97, GQA +2.26, SciQA −3.37 | MME +7.5, POPE −0.21, TextVQA −0.19, GQA +1.43, SciQA +2.24 |
+
+Two things matter more than the raw deltas.
+
+**It closes most of the gap to the dense 576-token baseline at 44% of the tokens.**
+v8 at 256 tokens reaches POPE-acc 84.33 against the baseline's 84.89 (−0.56,
+effectively matched) and GQA 56.07 against 58.30 (−2.23). v4 at the same budget was
+−3.32 and −5.95. TextVQA remains far off (28.47 vs 41.00) but moved 5.3 points, and
+SciQA is the one place v8 is clearly worse.
+
+**It is the first run in this project with a real budget–accuracy gradient.** Spread
+from 256 down to 16 tokens:
+
+| run | MME-P | POPE-acc | POPE-F1 | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|---|
+| v4 | −2.94 | 0.87 | 1.65 | 7.19 | 3.25 | 1.17 |
+| v5 | −4.68 | 0.49 | 0.85 | −0.35 | 0.82 | 0.56 |
+| **v8** | **46.34** | **3.84** | **4.44** | 1.78 | **8.76** | **3.46** |
+
+v4 and v5 were flat — 16 tokens scored the same as 256, sometimes better, which is what
+made the whole elasticity axis meaningless and produced the ~0 prefix-KL. v8 is
+monotone and materially sloped on MME, POPE, TextVQA and GQA. That is the property the
+architecture was supposed to have, and PARCEL is the first thing that produced it.
+
+Caveat kept in view: single seed, one backbone.
+
+### 16d. Rank-nested vision LoRA is a regression; default is now off
+
+Decision 6 turned rank-nested vision LoRA on for all runs (v5) on the hypothesis that a
+vision tower which cannot adapt per level was why v4 was flat. **That A/B has now
+resolved against it, on both backbones it was run on.**
+
+| run pair | 256-token deltas |
+|---|---|
+| TinyLlama v5 − v4 | MME −77.9, POPE-acc −2.19, POPE-F1 −2.26, SciQA −1.93, TextVQA −4.59, GQA −1.44 |
+| SmolLM2 v5 − v4 | MME −38.8, POPE-acc −0.82, POPE-F1 −0.65, SciQA −9.91, TextVQA −3.39, GQA −0.72 |
+
+It lost on every benchmark on both backbones, and it did not deliver the elasticity it
+was adopted for either — v5's 256-vs-16 spread is *flatter* than v4's on every metric
+(table in §16c). The hypothesis was reasonable and the ablation was run properly; the
+answer is just no.
+
+Changed accordingly, in both `scripts/v1_5/pretrain_elastic_slm.sh` and
+`scripts/v1_5/finetune_elastic_slm.sh`:
+
+- `--vision_lora_enable` now defaults to **False** (was hardcoded `True` since v5) and
+  reads `${VISION_LORA_ENABLE:-False}`.
+- `--vision_lora_specialize_tok` is now passed explicitly and reads
+  `${VISION_LORA_SPECIALIZE_TOK:-True}` — previously it was never passed at all, so it
+  silently took `train_elastic.py`'s `True` default. Making it explicit is what allows
+  a **shared, non-nested** adapter to be requested (v10).
+- Both scripts echo the resolved values into the job log, because Stage 1 and Stage 2
+  must agree: they determine the adapter buffer width, and a mismatch reproduces the
+  job-27267 warm-start size mismatch.
+- The v5 rationale comments are kept and annotated with the outcome, rather than
+  deleted. A future reader should be able to see that the flag was an ablation with a
+  reason, and what the reason turned out to be worth.
+
+SciQA is the one metric where the story is not clean: v8 loses ~3 points to v4 at most
+levels, and v4 is the only vision-LoRA-off run in that comparison, so the SciQA
+regression tracks the LoRA flag rather than PARCEL. v9 (PARCEL, LoRA off, same grid)
+is the run that separates them.
+
+**Scope limit — do NOT write "vision LoRA always hurts" in the paper.** The evidence
+does not support a universal claim, and our own best model contradicts one. Every
+checkpoint audited 2026-09-09:
+
+| run | resampler | vision LoRA | outcome |
+|---|---|---|---|
+| v4 (tinyllama, smollm2, phi2) | `query` | **off** | baseline |
+| v5 (tinyllama, smollm2) | `query` | on | lost to v4 on both |
+| v6-tokrange | `query` | on | lost badly, but confounded by the 576 ladder (§16b) |
+| **v8-parcel** | `pool_anchored` | **on** | **best model in the project** |
+
+The only controlled A/B on the flag is **v4 vs v5, both on the plain `query`
+resampler**. Under PARCEL, vision-LoRA-off has never been run at all — v8 has it *on*
+and wins. v9 is the first PARCEL run without it, and it changes two flags at once
+(LoRA off **and** decorrelation on), so it does not isolate the flag either. **v11**
+(PARCEL, decorrelation off, vision LoRA off) is the only design that would, which is
+the argument for un-deferring it (§16e).
+
+The deltas we do have are real rather than noise — TinyLlama's GQA −1.44 is ~3× the
+0.44pp stderr, and TextVQA −4.59 / MME −77.9 are far outside it. What is thin is
+**generality**: two backbones, one seed each, one resampler variant. So the defensible
+paper claim is scoped to the mechanism, not the component:
+
+> Rank-nested, per-level vision LoRA did not produce the per-level specialization it
+> was introduced for: on both backbones tested it degraded accuracy relative to a
+> frozen tower and *flattened* rather than widened the budget–accuracy spread.
+
+with the two-backbone/one-seed limitation stated. Note also that the nearest literature
+support (Prismatic VLMs, Karamcheti et al. ICML 2024, which found tuning the vision
+backbone degrades performance) is about **full fine-tuning**, not LoRA and not
+per-level nested LoRA — while Qwen-VL, InternVL and Idefics2 all adapt the vision
+encoder deliberately, several reporting gains exactly on the OCR/high-resolution axis
+where our TextVQA gap lives. The literature is mixed; it is not a unanimous result to
+lean on. A proper search pass in the style of §6/§14 has **not** been run on this
+question yet.
+
+### 16g. Standing decision: v9-as-default is conditional and not yet actionable
+
+**Decision (2026-09-09): if v9 beats v8, v9's configuration becomes the default for all
+future experiments.** Recorded here because v9 had not started when it was made — all
+8 nodes were still `down` — so nothing could be applied yet.
+
+Two conditions on executing it, both to be checked when v9's eval lands:
+
+1. **v9 differs from v8 by two flags**, not one: decorrelation on *and* vision LoRA
+   off. "Adopt v9's setting" therefore adopts both, without evidence for which
+   produced the gain — and per the scope limit above, vision-LoRA-off is *not* the
+   obvious attribution, since v8 wins with it on. **v11 is now queued (27386/27387)
+   precisely so this is answerable** — v11 vs v9 isolates decorrelation, v11 vs v8
+   isolates vision LoRA — so read all three before promoting any flag to a default.
+2. "Any improvement" needs a threshold. GQA's stderr is 0.44pp and POPE/SciQA are
+   comparable, so a sub-1-point win on a single benchmark is not a result. Treat a
+   consistent gain across benchmarks and across levels — the shape of the v8-vs-v5
+   comparison in §16c — as the bar, not a single cell moving.
+
+### 16e. v9 re-scoped, v10 queued, and recipes are now recorded in git
+
+**v9-parcel-decorr** (jobs 27376/27377) was cancelled before it started — it never
+got a node, the cluster having been down since §15a — and requeued (finally as **27382/27383**, after a
+first pass that pinned the wrong GPU type — see the GPU note below).
+Two changes:
+
+- **Ladder**: moved from the 8-level `576…16` to **v8's `256 144 64 16`**. §16b
+  retired that ladder, and v9's whole purpose is to isolate the decorrelation term
+  against v8 — which it cannot do from a different grid.
+- **Vision LoRA off**, per §16d.
+
+Its eval array is `--array=0-3` now, matching the 4-level grid.
+
+So v9 = PARCEL + decorrelation, vision LoRA off, v8's grid. Against v8 it isolates
+decorrelation *plus* the removal of nested LoRA; against v4 it is the clean
+"does decorrelation help" read on a comparable architecture.
+
+**v10-parcel-lora16** is new: v8's recipe with vision LoRA as a **single shared rank-16
+adapter** instead of rank-nested-per-level, decorrelation off. Mechanically that is
+`VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=False LORA_RANKS="16 16 16 16"` —
+`ElasticConfig.lora_level_for_tok` returns `len(lora_ranks)-1` when `specialize_tok` is
+False, so every level uses `lora_ranks[-1] = 16`, and `NestedLoRALinear` allocates its
+`lora_A`/`lora_B` at `max(lora_ranks) = 16`. One adapter, one rank, no nesting.
+`STAGE1_LORA_RANK` must be 16 to match that buffer width. Queued as **27384/27385**.
+Rank 16 is also where §11's
+LoRA-rank literature check (LangVision-LoRA-NAS) put the plausible sweet spot, versus
+the 64 we have been using on the assumption that "above where sweeps go flat" is safe.
+
+**v11-parcel-nolora** — PARCEL alone: decorrelation off, vision LoRA off. Deferred
+when first proposed, then **un-deferred the same day** once the §16d audit showed that
+v8, the best model in the project, has vision LoRA *on*, and that the only controlled
+A/B on that flag (v4 vs v5) was run on the plain `query` resampler. v11 is the control
+v8 never had, and it is what makes the other two runs readable:
+
+| comparison | isolates |
+|---|---|
+| **v11 vs v8** | vision LoRA, under PARCEL (decorrelation off in both) |
+| **v11 vs v9** | decorrelation (vision LoRA off in both) |
+| **v10 vs v11** | vision LoRA again, but shared rank-16 instead of rank-nested |
+
+Without v11, v9-vs-v8 moves two flags at once and attributes nothing — which is the
+condition §16g attaches to making v9 the default.
+
+**`submit_elastic_run.sh` is new, and exists because of a real failure of record.**
+Runs were being launched as bare `ELASTIC_RUN_TAG=… FOO=… sbatch run_job_slm.sh
+tinyllama`, which puts the entire experiment definition in the submitting shell's
+environment. SLURM propagates it via `--export=ALL` but records it nowhere readable:
+`scontrol show job` shows only the command line. Recovering v9's token ladder needed
+its eval array's `--array=0-7` as *circumstantial evidence*, because the shell that
+defined it was long gone. Every recipe now lives in that script, in git, and
+`DRY_RUN=1` prints the fully resolved configuration before anything is submitted.
+
+It also appends every submission to **`docs/SUBMITTED_RUNS.tsv`** — timestamp, recipe,
+both job ids, the ladder, ranks, resampler, decorrelation and vision-LoRA flags, and
+the checkpoint path. This closes the other half of the same gap: `scontrol show job`
+reports `run_job_slm.sh tinyllama` for v9 and v10 *identically*, so even with the
+recipes in git there was nothing on disk mapping a job id back to the recipe that
+produced it. Append-only, and job ids are never reused.
+
+**GPU request: untyped `--gres=gpu:2`, not a pinned card type.** The first submission
+inherited `gpu:A10:2` from §15c, which pins every run to node208 and makes three
+`--exclusive` jobs queue single-file behind one node. Only node205 (`A40:2`) and
+node208 (`A10:2`) have two GPUs at all — node206 and node207 have one each — so
+`gpu:2` already resolves to exactly those two and lets SLURM place a run on whichever
+frees first. Verified this does not break comparability: nothing in the **training**
+path branches on GPU type. `per_device_train_batch_size` is a fixed constant in both
+stage scripts (16 in Stage 1, 2 in Stage 2) and `NUM_GPUS` defaults to 2 either way,
+so a run is identical on A40 and A10 and only wall-clock differs. (`eval_lmms_level.sh`
+*does* pick its eval batch size by GPU type, but that changes throughput, not scores.)
+Both card types have headroom — v8-parcel carries a heavier rank-64 nested adapter than
+anything queued here and completed its full 84.5h run on node208's A10:2.
+
+All three runs are queued behind the outage — every node was still `down` at submit
+time, so none has started and no checkpoint directory exists yet. Three
+`--exclusive` jobs against two eligible nodes means one always waits; that is expected,
+not a misconfiguration.
+
+| run | train | eval | decorr | vision LoRA |
+|---|---|---|---|---|
+| v9-parcel-decorr | 27382 | 27383 | **on** | off |
+| v10-parcel-lora16 | 27384 | 27385 | off | **shared r16** |
+| v11-parcel-nolora | 27386 | 27387 | off | off |
+
+`docs/SUBMITTED_RUNS.tsv` carries the same mapping with the full flag set.
+
+### 16f. Revision to §15e's hipster matrix
+
+**Every planned hipster run uses the v11 recipe — the v8-parcel configuration, the
+best-performing setup in this project (§16c), with vision LoRA OFF (§16d).** A second
+run per backbone, **v12**, layers the frozen 7B KD teacher on top of it.
+
+§15e proposed extending five backbones with "v9's exact recipe." Superseded on two
+counts: v9's recipe at the time meant the 8-level ladder (§16b) and, from decision 6,
+vision LoRA on (§16d). The matrix is unchanged in **which** backbones and **why** —
+only the recipe they inherit changes. §15e now carries a banner to that effect so its
+table cannot be read with the retired recipe. In full:
+
+```
+TOK_LEVELS="256 144 64 16"     LORA_RANKS="8 16 32 64"
+STAGE1_TOK_LEVEL=256           STAGE1_LORA_RANK=64
+RESAMPLER_ARCH=pool_anchored   ANCHOR_MODE=ratio   ANCHOR_RATIO=0.25
+VISION_LORA_ENABLE=False       USE_TOKEN_DECORRELATION=False
+VISION_TOWER=openai/clip-vit-large-patch14-336      TEACHER=self
+```
+
+That block **is** `v11-parcel-nolora`, verbatim — the hipster ports are not a separate
+design, they are v11 with a different backbone:
+
+```
+SLM_KEY=<backbone> GRES=<that cluster's 2-GPU spec> \
+    bash submit_elastic_run.sh v11-parcel-nolora
+```
+
+`ELASTIC_RUN_TAG` stays `v11-parcel-nolora` while the checkpoint path interpolates
+`SLM_KEY`, so each backbone lands in its own
+`elastic-finetune-<backbone>-v11-parcel-nolora` with no collision, and the local
+TinyLlama v11 (27386) is the reference point every port is measured against.
+`GRES` is overridable precisely because this script cannot know hipster's card names.
+
+Decorrelation is **off** for these: v9 has not reported yet, and putting an unvalidated
+loss term into every backbone port would confound the backbone comparison with it.
+
+#### v12-parcel-kd7b — v11 plus the frozen 7B teacher
+
+**New, hipster-only.** `TEACHER=llava` on top of the v11 recipe, everything else
+identical. It supersedes **v7-kd7b** (§15d), which asked the same question from the
+superseded v4-era setup and was cancelled mid-run by the outage — v12 asks it from the
+best base we have instead, so a positive result is directly comparable to v11 rather
+than to a configuration nothing else uses any more.
+
+The question is still the one §15d framed: `teacher=self` distills the model at
+`tok_levels[0]` into its own smaller levels and measures a KL of **~0.006** — teacher
+and student are literally the same weights on informationally equivalent inputs, so
+there is nothing to distill, and the KD term contributes ~0.01% of the loss.
+`teacher=llava` makes **every** level a student, `tok_levels[0]` included, which is the
+only way the KL in this codebase can carry real signal.
+
+Two hard constraints, both now enforced or flagged in `submit_elastic_run.sh`:
+
+- **Vocab.** `attach_kd_teacher` (`llava/model/elastic/engine.py:30`) raises when
+  teacher and student `vocab_size` differ, so v12 runs **only on Llama-32000
+  backbones**: `tinyllama` and `mobilellama`. `smollm2`, both Qwen rows and `phi2` are
+  excluded — three quarters of the §15e matrix. The recipe checks `SLM_KEY` up front
+  and exits 1 with that explanation, rather than crashing after Stage 1 has already
+  run.
+- **VRAM.** The frozen 7B costs ~14 GB/GPU on top of the student, and because it is a
+  plain attribute on `ElasticEngine` rather than a submodule, **ZeRO does not shard
+  it**. A40-class or better; it does not fit a 23 GB A10 alongside training. The recipe
+  raises its own `DEFAULT_GRES` to `gpu:A40:2` and prints a reminder to verify headroom
+  on whatever hipster card is targeted before assuming node205's numbers transfer.
+
+Neither v11-on-other-backbones nor v12 is queued locally — v12 in particular would be a
+fourth `--exclusive` job against two eligible nodes, and it is A40-only, which is
+exactly the contention §15d moved this work off the local cluster to avoid.
+
+Sequencing for the **v11** ports from §15e still stands (SmolLM2 → Phi-2 → the Qwen
+pair → MobileLLaMA), and
+so does its caveat that the two Qwen rows need their own baseline before their numbers
+mean anything. One addition: with vision LoRA off, **SmolLM2's existing v4 is already
+the matched baseline** for its PARCEL run — v4 is vision-LoRA-off on the same grid, so
+SmolLM2 v4 → v8-style is a clean one-change comparison and the cheapest real result
+available on that cluster.
+
+**v12 sequencing** is separate and short, since only two backbones are eligible:
+`tinyllama` first — it has v8, v9, v10 and v11 to compare against, so a KD result is
+immediately interpretable — then `mobilellama` only if the TinyLlama result justifies
+it. Note `mobilellama` has no elastic baseline of any kind (§15e), so it would need its
+v11 port run before its v12 number means anything.
+
+v7-kd7b's cancelled `checkpoint-1000` (§15d) is **not** a resume point for v12: it was
+trained under the v4-era setup, not v11. Treat v12 as a fresh run and that checkpoint
+as deletable once v12 is under way.

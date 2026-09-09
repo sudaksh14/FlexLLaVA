@@ -30,6 +30,24 @@
 # visual tokens. v5 flips this True to test whether rank-nested vision LoRA
 # is what was missing. Treat v4 vs v5 as a controlled A/B on this one flag.
 #
+# ── 2026-09-09: that A/B RESOLVED AGAINST rank-nested vision LoRA; the
+# default is back to False ────────────────────────────────────────────────
+# v5 lost to v4 on every benchmark, on BOTH backbones it was run on
+# (TinyLlama: MME -78, TextVQA -4.6, GQA -1.4, POPE -2.2 at 256 tok;
+# SmolLM2: SciQA -9.9, MME -39, TextVQA -3.4), and it did NOT buy the
+# elasticity it was hypothesised to -- v5's 256-vs-16 spread was FLATTER than
+# v4's on every metric. Rank-nested vision LoRA is a net regression, so it is
+# off by default from v9 onward and every future run inherits that. See
+# docs/EXPERIMENT_JOURNAL.md section 16.
+#
+# VISION_LORA_ENABLE / VISION_LORA_SPECIALIZE_TOK are env-overridable so a run
+# can opt back in deliberately. The v10 recipe uses a single SHARED rank-16
+# adapter (VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=False with
+# lora_ranks ending at 16) -- that is a different mechanism from v5's
+# per-level nested ranks, and is the only sanctioned way to have vision LoRA
+# on. Whatever these are set to here MUST match finetune_elastic_slm.sh, or
+# Stage 2 warm-starts from a checkpoint with the wrong adapter buffer.
+#
 # ── v5 follow-up (2026-08-31): --lora_ranks must end at Stage 2's max rank,
 # not Stage 1's rank ─────────────────────────────────────────────────────
 # NestedLoRALinear allocates lora_A/lora_B at max(lora_ranks) ONCE, at
@@ -133,6 +151,7 @@ echo "[FlexLLaVA] Output → ${OUTPUT_DIR}"
 STAGE1_TOK_LEVEL="${STAGE1_TOK_LEVEL:-256}"
 STAGE1_LORA_RANK="${STAGE1_LORA_RANK:-64}"
 echo "[FlexLLaVA] tok_level=${STAGE1_TOK_LEVEL}  lora_rank=${STAGE1_LORA_RANK}  (must match finetune's largest tok_level / max lora_rank)"
+echo "[FlexLLaVA] vision_lora_enable=${VISION_LORA_ENABLE:-False}  specialize_tok=${VISION_LORA_SPECIALIZE_TOK:-True}  (off by default since 2026-09-09; must match finetune_elastic_slm.sh)"
 
 deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --tok_levels ${STAGE1_TOK_LEVEL} \
@@ -144,7 +163,8 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --use_token_decorrelation "${USE_TOKEN_DECORRELATION:-False}" \
     --decorr_weight "${DECORR_WEIGHT:-0.01}" \
     --prefix_kl_weight 0.1 \
-    --vision_lora_enable True \
+    --vision_lora_enable "${VISION_LORA_ENABLE:-False}" \
+    --vision_lora_specialize_tok "${VISION_LORA_SPECIALIZE_TOK:-True}" \
     --coral_weight 0.01 \
     --use_pos_embed True \
     --pos_embed_type learned \

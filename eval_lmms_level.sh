@@ -21,19 +21,38 @@
 MODEL_PATH=${1:-/var/scratch/skalra/flexllava/checkpoints/llava-elastic-pretrain}
 LEVEL=$SLURM_ARRAY_TASK_ID
 
-# Read tok_levels from the checkpoint's own elastic_config.json rather than
-# hardcoding 4 -- a checkpoint trained with a different grid (e.g. the
-# extended 8-level range experiment) needs a matching label list, and
-# --array must be overridden to match too: sbatch --array=0-7 eval_lmms_level.sh <ckpt>
-if [ -f "${MODEL_PATH}/elastic_config.json" ] && command -v jq >/dev/null; then
-    mapfile -t TOK_LEVELS_JSON < <(jq -r '.tok_levels[]' "${MODEL_PATH}/elastic_config.json")
-    TOK_LABELS=()
-    for t in "${TOK_LEVELS_JSON[@]}"; do TOK_LABELS+=("${t}tok"); done
-else
-    echo "WARNING: ${MODEL_PATH}/elastic_config.json not found or jq missing;" \
-         "falling back to the default 4-level label list."
-    TOK_LABELS=("256tok" "144tok" "64tok" "16tok")
+module load cuda12.6/toolkit/12.6
+
+eval "$(conda shell.bash hook)"
+conda activate matryoshka-mm
+
+# Read tok_levels directly from the checkpoint's own elastic_config.json via
+# python3 (the same conda-env interpreter used later in this script, line
+# ~130 below -- guaranteed present) rather than jq. jq's SYSTEM-WIDE
+# availability turned out to be inconsistent across compute nodes: job 27292
+# (2026-09-08, v6-tokrange eval, 8-level grid) had array tasks 0-3 read the
+# config fine and tasks 4-7 silently fall back to the hardcoded 4-level
+# default and error out ("no tok_levels entry at index 4") even though
+# elastic_config.json existed with all 8 levels the whole time -- whichever
+# node tasks 4-7 landed on simply didn't have jq on PATH. No silent fallback
+# now: if the config can't be read, fail loudly instead of guessing a grid
+# that will silently mislabel every result under it.
+if [ ! -f "${MODEL_PATH}/elastic_config.json" ]; then
+    echo "ERROR: ${MODEL_PATH}/elastic_config.json not found -- cannot determine tok_levels." >&2
+    exit 1
 fi
+mapfile -t TOK_LEVELS_JSON < <(python3 -c "
+import json
+cfg = json.load(open('${MODEL_PATH}/elastic_config.json'))
+for t in cfg['tok_levels']:
+    print(t)
+")
+if [ ${#TOK_LEVELS_JSON[@]} -eq 0 ]; then
+    echo "ERROR: failed to parse tok_levels out of ${MODEL_PATH}/elastic_config.json" >&2
+    exit 1
+fi
+TOK_LABELS=()
+for t in "${TOK_LEVELS_JSON[@]}"; do TOK_LABELS+=("${t}tok"); done
 LABEL=${TOK_LABELS[$LEVEL]}
 if [ -z "$LABEL" ]; then
     echo "ERROR: no tok_levels entry at index $LEVEL (checkpoint has ${#TOK_LABELS[@]} levels)." \
@@ -84,11 +103,6 @@ fi
 # alongside accuracy, using the same roofline cost model as AdaLLaVA.
 # See llava/eval/efficiency/NOTICE.md for what they do and don't capture.
 EFF_HARDWARE="${EFF_HARDWARE:-jetson_orin_nano_8gb}"
-
-module load cuda12.6/toolkit/12.6
-
-eval "$(conda shell.bash hook)"
-conda activate matryoshka-mm
 
 export HF_HOME=/var/scratch/skalra/.cache/huggingface
 export HF_DATASETS_CACHE=/var/scratch/skalra/.cache/huggingface/datasets

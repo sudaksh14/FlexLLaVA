@@ -44,6 +44,24 @@
 # flat 256-vs-16-token accuracy result. v5 flips this True to test whether
 # rank-nested vision LoRA is what was missing. Treat v4 vs v5 as a controlled
 # A/B on this one flag, not a bug fix.
+#
+# ── 2026-09-09: that A/B RESOLVED AGAINST rank-nested vision LoRA ─────────
+# v5 lost to v4 on every benchmark and on both backbones it was run on, and
+# it did not buy elasticity either (its 256-vs-16 spread was flatter than
+# v4's). The default here is back to False, and every run from v9 onward
+# inherits it. What DID buy both accuracy and elasticity was the PARCEL
+# pool-anchored resampler (v8, RESAMPLER_ARCH=pool_anchored) -- v8 beats v5,
+# its matched vision-LoRA-on control, by +134 MME / +9.9 TextVQA / +5.2 GQA
+# at 256 tok, and is the current best model. See docs/EXPERIMENT_JOURNAL.md
+# section 16.
+#
+# VISION_LORA_ENABLE / VISION_LORA_SPECIALIZE_TOK are env-overridable so a run
+# can opt back in deliberately. v10 is the sanctioned opt-in: a single SHARED
+# rank-16 adapter (VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=False,
+# LORA_RANKS ending at 16), which is a different mechanism from v5's per-level
+# nested ranks. Keep pretrain_elastic_slm.sh's VISION_LORA_* and
+# STAGE1_LORA_RANK in sync with whatever is used here, or Stage 2 warm-starts
+# from an adapter buffer of the wrong width (the job-27267 failure mode).
 
 LLM_KEY=${1:-"qwen0.5b"}
 
@@ -132,6 +150,7 @@ echo "[FlexLLaVA] tok_levels=${TOK_LEVELS:-256 144 64 16}  lora_ranks=${LORA_RAN
 # REQUIRES a vocab match: attach_kd_teacher raises if teacher and student
 # vocab sizes differ, so this only works for Llama-32000 backbones
 # (tinyllama, mobilellama), NOT smollm2/qwen/phi.
+echo "[FlexLLaVA] vision_lora_enable=${VISION_LORA_ENABLE:-False}  specialize_tok=${VISION_LORA_SPECIALIZE_TOK:-True}  (off by default since 2026-09-09; must match pretrain_elastic_slm.sh)"
 echo "[FlexLLaVA] teacher=${TEACHER:-self}  prefix_kl_weight=${PREFIX_KL_WEIGHT:-0.1}  (TEACHER=llava for the frozen 7B; Llama-vocab backbones only)"
 
 deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
@@ -152,7 +171,8 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --pos_embed_type learned \
     --use_nested_dropout False \
     --n_sample_students 1 \
-    --vision_lora_enable True \
+    --vision_lora_enable "${VISION_LORA_ENABLE:-False}" \
+    --vision_lora_specialize_tok "${VISION_LORA_SPECIALIZE_TOK:-True}" \
     --lora_enable False \
     --lora_r 128 \
     --lora_alpha 128 \
