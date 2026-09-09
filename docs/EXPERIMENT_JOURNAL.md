@@ -48,6 +48,7 @@ Every decision below is the user's; the "result" column is what actually happene
 | 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
 | 24 | Cluster-wide reboot (all 8 nodes down) interrupted v7-kd7b mid-training and truncated v6-tokrange's eval to 4/8 levels. Cancel v7-kd7b and its eval outright; requeue the missing v6-tokrange levels with the script bug fixed; resize v9-parcel-decorr to fit on A10 (node208) instead of A40 (node205) so node205 stays free; write up the backbone/PARCEL/decorr ablation matrix that doesn't fit locally as a pending-work list for the other ("hipster") cluster. | Done (§15). Found and fixed a real bug in `eval_lmms_level.sh` along the way: `jq`'s availability is inconsistent across compute nodes, so 4 of 8 v6-tokrange eval array tasks silently fell back to a wrong 4-level default and errored out even though `elastic_config.json` was present and correct the whole time — replaced with a `python3`-based parse (env-guaranteed) and a loud failure instead of a silent wrong-grid fallback. v7-kd7b (27299) + its eval (27300) cancelled; v6-tokrange's missing levels (576/512/448/384-token) requeued as job 27375 `--array=4-7`. v9-parcel-decorr requeued as job 27376/27377 with `--gres=gpu:A10:2` (was A40:2) — justified by v8-parcel, the identical architecture minus the decorrelation term, having already completed its full 84.5h run cleanly on node208's A10:2. |
 | 25 | Analyse v6's available eval levels and v8 against the earlier runs and say whether any introduced change actually helped; record the outcome; make **v8 the best working model**; drop rank-nested vision LoRA from all future runs including v9; queue **v10** with vision LoRA fixed at 16 for both stages; re-scope the hipster matrix to the v8 setup with vision LoRA off, stating in that section that v8 is the best-performing config and that vision LoRA is off; rename v6's eval folders correctly and verify the pending evals land in the right ones. | Done (§16). **Yes, one change helped: PARCEL (v8) — the only run with a real budget–accuracy gradient, and the new best model (§16c).** The other two introduced changes lost: rank-nested vision LoRA is a regression on both backbones (§16d, default now False), and the extended 576→16 ladder is a large regression (§16b, retired). Found along the way that §15b's root cause was recorded backwards: *every* task of job 27292 hit the `jq` fallback, so v6's four surviving results were not 256/144/64/16 at all but 576/512/448/384 written under the wrong labels — verified against the measured prefill FLOPs and relabelled (§16a). v9 cancelled and re-scoped onto v8's grid with LoRA off; v10 added; v11 deferred by decision; recipes moved out of submitting-shell env vars into `submit_elastic_run.sh` (+ a `docs/SUBMITTED_RUNS.tsv` job-id→recipe log) in git, after v9's ladder had to be recovered from circumstantial evidence. v9 requeued as 27378/27379 and v10 as 27380/27381, both `--array=0-3`; all 8 nodes were still `down` at submit time, so neither has started. |
+| 30 | Confirm v12 is explicitly queued for `tinyllama` in the hipster pipeline, not just `mobilellama`. | It was not — §16f described `tinyllama` v12 only as prose ("tinyllama first"), and §15e's eligibility note read as though `tinyllama` were already covered ("not in this table because it runs locally"), which was true of v9/v10/v11 but not of v12 (deliberately excluded from the local queue). Corrected both passages: the hipster v12 pipeline now lists both `tinyllama` and `mobilellama` as explicit submit commands, `tinyllama` first. |
 | 29 | Restrict the v6 eval job to node206/207 so it does not interfere with the training runs. | Done via `scontrol update jobid=27375 ReqNodeList=node206,node207` — applied to all four pending array tasks at once (§16a). Those are the two single-GPU nodes; the eval only asks for `gpu:1`, but without the pin it could take node205 or node208 and block an `--exclusive` training job for a whole benchmark sweep. Scores are unaffected — the only GPU-type branch in the eval path is its batch size (A40 → 8, A10 → 4), which is throughput. The three queued evals (27383/27385/27387) are **not** pinned: they are dependency-held behind their own training jobs, so by the time they release, the node those jobs occupied is free anyway. |
 | 28 | Put v11 into the hipster pipeline too, and add a new **v12** there: v11's setup plus the 7B-teacher KD. Update the journal. | Done (§16f). The hipster ports are now stated as **v11 verbatim with a different `SLM_KEY`**, not a separate design — `ELASTIC_RUN_TAG` stays `v11-parcel-nolora` while the checkpoint path interpolates the backbone, so each lands in its own directory and the local TinyLlama v11 (27386) is the shared reference point. **v12-parcel-kd7b** added to `submit_elastic_run.sh`: `TEACHER=llava` on top of v11, superseding v7-kd7b (§15d), which asked the same question from the superseded v4-era setup. Two constraints made enforceable rather than documentary: the recipe **exits 1 up front** if `SLM_KEY` is not a Llama-32000 backbone (`attach_kd_teacher` would otherwise raise only after Stage 1 had run, and this excludes smollm2/qwen*/phi2 — three of the five matrix rows, leaving `mobilellama` as the only eligible hipster backbone), and it raises its own `DEFAULT_GRES` to A40-class for the frozen 7B's unsharded ~14 GB/GPU. `GRES` is now overridable per submission so these recipes can run on hipster's card names. Neither is queued locally: v12 is A40-only and would be a fourth exclusive job against two eligible nodes, which is the contention §15d moved this work off-cluster to avoid. |
 | 27 | Queue v11 as well; stop pinning jobs to a GPU type — request 2 GPUs so runs can land on either node205 (A40:2) or node208 (A10:2) instead of stacking on one node. | Done. **v11-parcel-nolora** (PARCEL, decorrelation off, vision LoRA off) queued as 27386/27387 — the control v8 never had, and what makes v9 and v10 attributable (§16e). All three runs resubmitted with untyped `--gres=gpu:2`: node205 and node208 are the only 2-GPU nodes in `defq` (206/207 have one each), so `gpu:2` resolves to exactly those two. Checked before switching that this cannot silently change results — nothing in the training path branches on GPU type (`per_device_train_batch_size` is a constant in both stages, `NUM_GPUS` defaults to 2), so a run is identical on A40 and A10. Final ids: v9 27382/27383, v10 27384/27385, v11 27386/27387, all `--array=0-3`, all still pending on the outage. Also fixed a bug in `submit_elastic_run.sh`'s own log: the header guard tested `-f` rather than `-s`, so a truncated log would never regain its header. |
@@ -1064,10 +1065,15 @@ LoRA ranks) so every run would be a direct extension of v9; per the banner above
 now a direct extension of **v11** instead. Kept as written, with the one row whose
 rationale the change invalidates marked inline.
 
-**v12 eligibility** (the KD arm, §16f): `mobilellama` is the **only** row here that can
-run it — every other backbone fails the Llama-32000 vocab requirement the frozen
-LLaVA-1.5-7B teacher imposes, and `tinyllama`, which also qualifies, is not in this
-table because it runs locally.
+**v12 eligibility** (the KD arm, §16f): only two backbones pass the Llama-32000 vocab
+requirement the frozen LLaVA-1.5-7B teacher imposes — `tinyllama` and `mobilellama`.
+`mobilellama` is the only one of the two *in this table*, because the table lists
+backbones with no existing local footprint; `tinyllama` is missing from it only
+because v9/v10/v11 already run there, not because v12-on-tinyllama is spoken for.
+**v12-tinyllama is NOT queued anywhere** — §16f originally discussed it only as prose
+sequencing ("tinyllama first"), without adding it to the hipster pipeline as an actual
+entry. Corrected: both `tinyllama` and `mobilellama` are hipster-pipeline v12 runs, in
+that order — see §16f.
 
 | Backbone | `LLM_KEY` | Conv template | Existing local baseline? | Why this one |
 |---|---|---|---|---|
@@ -1463,11 +1469,25 @@ the matched baseline** for its PARCEL run — v4 is vision-LoRA-off on the same 
 SmolLM2 v4 → v8-style is a clean one-change comparison and the cheapest real result
 available on that cluster.
 
-**v12 sequencing** is separate and short, since only two backbones are eligible:
-`tinyllama` first — it has v8, v9, v10 and v11 to compare against, so a KD result is
-immediately interpretable — then `mobilellama` only if the TinyLlama result justifies
-it. Note `mobilellama` has no elastic baseline of any kind (§15e), so it would need its
-v11 port run before its v12 number means anything.
+**v12 hipster pipeline, both eligible backbones:**
+
+```
+SLM_KEY=tinyllama   GRES=<hipster A40-class spec>  bash submit_elastic_run.sh v12-parcel-kd7b
+SLM_KEY=mobilellama GRES=<hipster A40-class spec>  bash submit_elastic_run.sh v12-parcel-kd7b
+```
+
+**`tinyllama` first** — it has v8, v9, v10 and v11 to compare against, both locally and
+via the LLaVA-1.5-7B teacher's own vocabulary match, so a KD result is immediately
+interpretable. `mobilellama` only after the TinyLlama result justifies it, and only
+once `mobilellama`'s own **v11** port has run first (§15e) — it has no elastic
+baseline of any kind yet, so a `mobilellama` v12 number with no v11 to compare against
+would not be interpretable either.
+
+Corrected 2026-09-09: `tinyllama`-v12 had been discussed only as prose sequencing
+here, with no explicit hipster-pipeline entry — easy to misread as already covered by
+the local `tinyllama` runs (v9/v10/v11), which it is not; v12 was deliberately kept
+off the local queue (contention + A40-only, next paragraph). It is now stated as an
+explicit hipster submission, not an implication.
 
 v7-kd7b's cancelled `checkpoint-1000` (§15d) is **not** a resume point for v12: it was
 trained under the v4-era setup, not v11. Treat v12 as a fresh run and that checkpoint
