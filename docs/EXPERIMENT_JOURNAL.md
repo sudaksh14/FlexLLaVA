@@ -48,6 +48,9 @@ Every decision below is the user's; the "result" column is what actually happene
 | 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
 | 24 | Cluster-wide reboot (all 8 nodes down) interrupted v7-kd7b mid-training and truncated v6-tokrange's eval to 4/8 levels. Cancel v7-kd7b and its eval outright; requeue the missing v6-tokrange levels with the script bug fixed; resize v9-parcel-decorr to fit on A10 (node208) instead of A40 (node205) so node205 stays free; write up the backbone/PARCEL/decorr ablation matrix that doesn't fit locally as a pending-work list for the other ("hipster") cluster. | Done (§15). Found and fixed a real bug in `eval_lmms_level.sh` along the way: `jq`'s availability is inconsistent across compute nodes, so 4 of 8 v6-tokrange eval array tasks silently fell back to a wrong 4-level default and errored out even though `elastic_config.json` was present and correct the whole time — replaced with a `python3`-based parse (env-guaranteed) and a loud failure instead of a silent wrong-grid fallback. v7-kd7b (27299) + its eval (27300) cancelled; v6-tokrange's missing levels (576/512/448/384-token) requeued as job 27375 `--array=4-7`. v9-parcel-decorr requeued as job 27376/27377 with `--gres=gpu:A10:2` (was A40:2) — justified by v8-parcel, the identical architecture minus the decorrelation term, having already completed its full 84.5h run cleanly on node208's A10:2. |
 | 25 | Analyse v6's available eval levels and v8 against the earlier runs and say whether any introduced change actually helped; record the outcome; make **v8 the best working model**; drop rank-nested vision LoRA from all future runs including v9; queue **v10** with vision LoRA fixed at 16 for both stages; re-scope the hipster matrix to the v8 setup with vision LoRA off, stating in that section that v8 is the best-performing config and that vision LoRA is off; rename v6's eval folders correctly and verify the pending evals land in the right ones. | Done (§16). **Yes, one change helped: PARCEL (v8) — the only run with a real budget–accuracy gradient, and the new best model (§16c).** The other two introduced changes lost: rank-nested vision LoRA is a regression on both backbones (§16d, default now False), and the extended 576→16 ladder is a large regression (§16b, retired). Found along the way that §15b's root cause was recorded backwards: *every* task of job 27292 hit the `jq` fallback, so v6's four surviving results were not 256/144/64/16 at all but 576/512/448/384 written under the wrong labels — verified against the measured prefill FLOPs and relabelled (§16a). v9 cancelled and re-scoped onto v8's grid with LoRA off; v10 added; v11 deferred by decision; recipes moved out of submitting-shell env vars into `submit_elastic_run.sh` (+ a `docs/SUBMITTED_RUNS.tsv` job-id→recipe log) in git, after v9's ladder had to be recovered from circumstantial evidence. v9 requeued as 27378/27379 and v10 as 27380/27381, both `--array=0-3`; all 8 nodes were still `down` at submit time, so neither has started. |
+| 33 | If decorrelation is shown to help (per v9), add it to v13's recipe too. | Recorded as a standing decision (§16j), not yet actionable -- v9 (27382) is still training with no results. Flagged as its own item rather than folded silently into §16g's general "promote to default" trigger because v13 is a second already-running experiment (27393/27394, submitted with USE_TOKEN_DECORRELATION=False already baked into the job's captured environment) that is easy to forget when that trigger fires. Action recorded: check v9 against v8 AND v11 (the cleaner control for this specific flag), then either cancel+resubmit 27393/27394 or split off a v13b if 27393 has already started. |
+| 32 | Asked whether v11 could be made an 8-level ladder like v6, conditioned on it not adding training hours. | No — flagged rather than done silently. `kl_teacher_tok_level` defaults to index 0 (always the largest entry), and that level's forward runs every step regardless of ladder length, so moving v11 to v6's grid would grow the always-on teacher pass from 256 to 576 tokens (plus a costlier average sampled-student draw), adding real wall-clock the condition explicitly excluded. Asked the user how to proceed; chosen: leave v11 untouched as the exact-match control for v8/v9/v10, and run the question as its own experiment. **v13-parcel-longladder** added to `submit_elastic_run.sh` and queued (27393/27394) -- v11's flags on v6's 8-level grid and rank schedule, to test whether PARCEL fixes the long-ladder failure v6 showed on the plain query resampler (§16j). |
+| 31 | Analyze the v6 eval jobs for the remaining (256/144/64/16) token levels and compare against earlier evals. | Done (§16b/16i). All 8 levels now in. Confirms §16b's verdict with the complete ladder: the full 576-16 spread is barely larger than the top-4-only spread looked (TextVQA +0.79 over the whole 36x range), the short grid v6 shares with v4/v5/v8 is *less* elastic than v4's on that same range, TextVQA is non-monotone (16-tok scores above 144- and 64-tok), and v6@256 loses to v8@256 on every metric, worst on TextVQA (-13.75, roughly half of v8's score). Getting there required an unplanned detour (§16h): the §16a node restriction had put 27375 into an unreleasable SLURM hold (`ReqNodeList` requires ALL listed nodes, not any-of; regular users cannot release the resulting hold), and once resubmitted correctly with `--exclude`, an unexplained scheduler quirk kept later array tasks waiting on a busy node while an idle one sat unused, requiring the array to be split into separately-submitted pieces to actually land. |
 | 30 | Confirm v12 is explicitly queued for `tinyllama` in the hipster pipeline, not just `mobilellama`. | It was not — §16f described `tinyllama` v12 only as prose ("tinyllama first"), and §15e's eligibility note read as though `tinyllama` were already covered ("not in this table because it runs locally"), which was true of v9/v10/v11 but not of v12 (deliberately excluded from the local queue). Corrected both passages: the hipster v12 pipeline now lists both `tinyllama` and `mobilellama` as explicit submit commands, `tinyllama` first. |
 | 29 | Restrict the v6 eval job to node206/207 so it does not interfere with the training runs. | Done via `scontrol update jobid=27375 ReqNodeList=node206,node207` — applied to all four pending array tasks at once (§16a). Those are the two single-GPU nodes; the eval only asks for `gpu:1`, but without the pin it could take node205 or node208 and block an `--exclusive` training job for a whole benchmark sweep. Scores are unaffected — the only GPU-type branch in the eval path is its batch size (A40 → 8, A10 → 4), which is throughput. The three queued evals (27383/27385/27387) are **not** pinned: they are dependency-held behind their own training jobs, so by the time they release, the node those jobs occupied is free anyway. |
 | 28 | Put v11 into the hipster pipeline too, and add a new **v12** there: v11's setup plus the 7B-teacher KD. Update the journal. | Done (§16f). The hipster ports are now stated as **v11 verbatim with a different `SLM_KEY`**, not a separate design — `ELASTIC_RUN_TAG` stays `v11-parcel-nolora` while the checkpoint path interpolates the backbone, so each lands in its own directory and the local TinyLlama v11 (27386) is the shared reference point. **v12-parcel-kd7b** added to `submit_elastic_run.sh`: `TEACHER=llava` on top of v11, superseding v7-kd7b (§15d), which asked the same question from the superseded v4-era setup. Two constraints made enforceable rather than documentary: the recipe **exits 1 up front** if `SLM_KEY` is not a Llama-32000 backbone (`attach_kd_teacher` would otherwise raise only after Stage 1 had run, and this excludes smollm2/qwen*/phi2 — three of the five matrix rows, leaving `mobilellama` as the only eligible hipster backbone), and it raises its own `DEFAULT_GRES` to A40-class for the frozen 7B's unsharded ~14 GB/GPU. `GRES` is now overridable per submission so these recipes can run on hipster's card names. Neither is queued locally: v12 is A40-only and would be a fourth exclusive job against two eligible nodes, which is the contention §15d moved this work off-cluster to avoid. |
@@ -1139,9 +1142,17 @@ Restricted in place with `scontrol update jobid=27375 ReqNodeList=node206,node20
 pending array tasks at once. No effect on the numbers: `eval_lmms_level.sh` picks its
 eval batch size by card (A40 → 8, A10 → 4), which changes throughput, not scores.
 
-### 16b. v6-tokrange: extending the ladder to 576 tokens failed
+**CORRECTION — this update broke the job; see §16h.** `ReqNodeList` means "must
+include all of these nodes," not "may use any of these" — setting it to two nodes on
+a 1-node job is unsatisfiable and silently zeroed the job's priority into a hold that
+even its own owner could not release. 27375 never ran under this restriction; §16h has
+the incident and the actual fix.
 
-Only the top four levels exist; 256/144/64/16 are still queued as job 27375.
+### 16b. v6-tokrange: extending the ladder to 576 tokens failed, confirmed on all 8 levels
+
+Updated 2026-09-10: the real 256/144/64/16 levels landed (jobs 27388_4, 27390_5,
+27391_6/7, after the node-restriction detour in §16h) and are folded in below —
+originally only the top four (576/512/448/384) existed.
 
 | tokens | MME-P | POPE-acc | POPE-F1 | SciQA | TextVQA | GQA |
 |---|---|---|---|---|---|---|
@@ -1149,6 +1160,10 @@ Only the top four levels exist; 256/144/64/16 are still queued as job 27375.
 | 512 | 1043.50 | 79.78 | 78.04 | 47.35 | 14.51 | 50.33 |
 | 448 | 1035.22 | 79.98 | 78.40 | 47.10 | 14.35 | 50.29 |
 | 384 | 1038.28 | 80.09 | 78.59 | 47.10 | 14.63 | 50.22 |
+| 256 | 1023.11 | 79.94 | 78.70 | 47.40 | 14.72 | 50.27 |
+| 144 | 1001.33 | 79.43 | 78.06 | 41.70 | 13.91 | 49.64 |
+| 64  |  991.89 | 79.06 | 77.50 | 41.20 | 13.80 | 49.64 |
+| 16  | 1005.30 | 79.39 | 77.99 | 42.39 | 14.02 | 49.55 |
 | *dense 576 baseline* | *1248.32* | *84.89* | *83.28* | *57.36* | *41.00* | *58.30* |
 
 At **576 tokens — the same count the uncompressed baseline uses**, so the resampler is
@@ -1157,19 +1172,51 @@ GQA and 206 of MME against that baseline. It is also worse than **v4 at 16 token
 TextVQA (14.81 vs 19.90) and MME (1042.7 vs 1116.4), i.e. worse than the same
 architecture on the short ladder using 36× fewer visual tokens.
 
-And the four levels are flat to within noise — TextVQA spread 0.46, GQA 0.44, SciQA
+The top four levels are flat to within noise — TextVQA spread 0.46, GQA 0.44, SciQA
 0.40 across a 1.5× change in budget. This is the [token-budget-has-no-effect] pattern
 again — the same "16 tokens ≈ 256 tokens" result that made the prefix-KL ~0 — now
 observed at the *top* of the ladder, where a gap should be easiest to produce.
 
-The most likely mechanism is the LoRA ranks the extended ladder forced. Keeping the
-ranks ascending with budget descending put ranks `2 4 6 8` on the four high-budget
-levels, versus `8 16 32 64` for the same architecture on the short ladder. Stated as a
-hypothesis, not a measured cause — separating "576 tokens is bad" from "rank 2 is bad"
-would need a run at 576 with a large rank, which nothing on the roadmap currently does.
+**With all 8 levels in hand, the full spread (576 − 16 tokens) is barely larger than the
+top-four-only spread was**: MME +37.4, POPE-acc +1.07, SciQA +5.11, TextVQA **+0.79**,
+GQA +1.11 across the *entire* 36× range. Confined to the short grid alone
+(256→16, the same range v4/v5/v8 are measured on) it is MME +17.8, POPE +0.55, SciQA
++5.01, TextVQA **+0.70**, GQA +0.72 — smaller than v4's spread on the same range and an
+order of magnitude below v8's (§16c: MME 46.3, TextVQA 8.76, GQA 3.46). Extending the
+ladder to 576 did not just fail to add elasticity at the top, the resulting run is
+*less* elastic than v4 across the short range both share.
 
-**Consequence:** the 8-level 576→16 ladder is retired. v9 was on it and has been moved
-to v8's 4-level grid (§16e).
+TextVQA is flat to the point of being non-monotone: 14.81 → 14.51 → 14.35 → 14.63 →
+14.72 → 13.91 → 13.80 → **14.02** — the 16-token level scores *higher* than the 144-
+and 64-token levels. Whatever the extra levels and rank range buy this run, it is not a
+usable budget–accuracy tradeoff anywhere on it.
+
+**Head-to-head against the current best model, at the token count they share:**
+
+| | v6@256 | v8@256 | delta | dense baseline | v6 vs baseline |
+|---|---|---|---|---|---|
+| MME-P | 1023.11 | 1170.25 | −147.1 | 1248.32 | −225.2 |
+| POPE-acc | 79.94 | 84.33 | −4.39 | 84.89 | −4.95 |
+| SciQA | 47.40 | 48.14 | −0.74 | 57.36 | −9.96 |
+| TextVQA | 14.72 | 28.47 | **−13.75** | 41.00 | **−26.28** |
+| GQA | 50.27 | 56.07 | −5.80 | 58.30 | −8.03 |
+
+v6 loses to v8 on every metric at the same budget, worst on TextVQA (roughly half of
+v8's score), and at 256 tokens — 44% of the baseline's budget, same fraction v8 uses —
+it recovers almost none of the ground v8 does.
+
+The most likely mechanism is the LoRA ranks the extended ladder forced. Keeping ranks
+ascending with budget descending put `2 4 6 8` on the four high-budget levels versus
+`8 16 32 64` for the same architecture on the short ladder — but now that the
+short-range levels are in hand too, they inherit ranks `8 16 32 64`, the *same* ranks
+v4/v5/v8 use at those exact tok_levels, and still underperform all three there. So low
+rank at the high-budget end does not fully explain it; something about training eight
+nested levels at once (vs. four) may be diluting the shared resampler capacity across
+a wider range. Stated as a hypothesis, not a measured cause — nothing on the roadmap
+currently isolates it.
+
+**Consequence unchanged, now backed by the complete ladder:** the 8-level 576→16
+ladder is retired. v9 was on it and has been moved to v8's 4-level grid (§16e).
 
 ### 16c. v8-parcel: the first change that improved anything, and the new best model
 
@@ -1492,3 +1539,112 @@ explicit hipster submission, not an implication.
 v7-kd7b's cancelled `checkpoint-1000` (§15d) is **not** a resume point for v12: it was
 trained under the v4-era setup, not v11. Treat v12 as a fresh run and that checkpoint
 as deletable once v12 is under way.
+
+
+### 16h. Incident: the node-restriction update from §16a stuck job 27375, and how it was fixed
+
+`scontrol update jobid=27375 ReqNodeList=node206,node207` (§16a) was meant to keep the
+v6-tokrange eval off the two 2-GPU nodes v9/v10/v11 need. It broke the job instead.
+`ReqNodeList` requires **all** listed nodes to be allocated together — for a script
+declaring `--nodes=1` that is unsatisfiable — and rather than erroring, SLURM zeroed
+the job's `Priority` to 0 (the hold state) and left `Reason=BadConstraints` stale from
+before the update. `scontrol release 27375`, run as the job's own owner, came back
+`Access/permission denied` — the hold was not one a regular user can lift.
+
+Cancelled 27375 and resubmitted the same `--array=4-7` with `--nodelist=node206,node207`
+at `sbatch` time instead — same error, same root cause
+(`invalid number of nodes (-N 2-1)`): `--nodelist` has the identical "must include all"
+semantics as `ReqNodeList`, regardless of whether it is applied at submission or after
+the fact. The correct primitive for "restrict to a set" is **`--exclude`** naming
+everything else, which has no such ambiguity. Resubmitted as job **27388**
+(`--array=4-7`, `--exclude=node201,node202,node203,node204,node205,node208`) and it
+ran immediately.
+
+`27388_4` (256 tok) started on node207 right away. The remaining three tasks
+(144/64/16 tok) then sat `Reason=Priority` with node206 completely idle — confirmed
+genuinely free (`CPUAlloc=0`, no `AllocTRES`, GPU unclaimed, no reservation, no drain)
+and re-evaluated by the scheduler roughly every two minutes (`sdiag` showed
+`LastSchedEval` advancing on schedule) without ever landing there. Root cause not
+fully determined — `defq` is `OverSubscribe=EXCLUSIVE` (one job per node regardless of
+requested resources, confirmed by `AllocTRES=cpu=64` on a job that asked for 8) and
+`node206`/`node207` have different `Weight=4`/`Weight=2`, but neither should on its own
+stall a job onto a busy node while leaving an idle one unused; this is `slurmctld`
+backfill-internal behavior not visible via `sdiag`/`scontrol` as a non-admin user.
+Worked around rather than root-caused: cancelled the three unstarted tasks and
+resubmitted **27390** (`--array=5`, excluding node207 as well so only node206 is
+eligible) and **27391** (`--array=6-7`, back to the original 206/207 pool). 27390_5
+started on node206 within seconds. All four tasks completed; results in §16b.
+
+**Two things to carry forward.** First: prefer `--exclude` over `--nodelist`/
+`ReqNodeList` for "restrict to a candidate set" on this cluster — `--nodelist` reads as
+a whitelist but behaves as a required-set, and the failure mode (an unreleasable hold)
+is worse than a rejected submission. Second: if a future array job's later tasks stall
+on a busy node while an eligible node sits idle, splitting the array into
+separately-submitted, disjoint node-restricted pieces is a working, if blunt, unstick.
+
+### 16i. v6-tokrange full ladder — see §16b for the analysis
+
+The results that motivated the §16h detour are written up in the now-complete §16b,
+not repeated here: all 8 levels are in, the top-four flatness holds across the full
+ladder (576−16 spread is TextVQA +0.79, GQA +1.11), TextVQA is non-monotone, and v6@256
+loses to v8@256 on every metric, worst on TextVQA (−13.75). No change to the §16b
+verdict — the 8-level ladder is retired — the complete data only sharpens it: the short
+grid v6 shares with v4/v5/v8 (256→16) is *less* elastic than v4's on the same range,
+not merely flat like the top four looked in isolation.
+
+### 16j. v13-parcel-longladder: does PARCEL fix v6's long-ladder failure?
+
+Asked whether v11 (the PARCEL/no-decorr/no-LoRA control, §16e) could be moved onto
+v6-tokrange's 8-level `576…16` ladder for free. It cannot: `kl_teacher_tok_level`
+defaults to index 0, and by convention that is always the *largest* `tok_levels`
+entry — the teacher forward, which runs on **every** step regardless of
+`n_sample_students`, would grow from 256 to 576 tokens, and the randomly sampled
+student's expected token count rises too (student pool mean ~75 tok on the short grid
+vs ~261 tok on the long one, since most added levels are large-budget). Real added
+wall-clock, roughly bounded by the ~2x FLOPs ratio measured for v6 itself
+(0.639→1.315 TFLOPs), on top of the ~85h short-grid Stage-2 runtime — not something
+that fits a "no extra hours" constraint.
+
+Decision: leave v11 as the fast, exactly-comparable control (256/144/64/16, matching
+v8/v9/v10), and run the long-ladder-under-PARCEL question as its own experiment
+instead. **v13-parcel-longladder** — queued as jobs **27393**/**27394** (`--array=0-7`)
+— is v11's flags (PARCEL, decorrelation off, vision LoRA off) on v6's exact 8-level
+grid and rank schedule (`576 512 448 384 256 144 64 16` / `2 4 6 8 8 16 32 64`,
+`STAGE1_TOK_LEVEL=576`). The rank schedule is copied from v6 deliberately, not chosen
+fresh: it keeps the four levels this ladder shares with v8/v9/v10/v11 (256/144/64/16)
+at the *same* ranks those runs use (`8 16 32 64`), so a head-to-head comparison at
+those four points isn't confounded by a rank change on top of the ladder-length one.
+
+What this run actually tests: v6 (`resampler_arch=query`) showed the extended ladder
+is flat, and on the 256-16 sub-range is *less* elastic than v4's own short-grid result
+(§16b/16i) — worse than not extending the ladder at all. v13 asks whether that failure
+is specific to the plain query resampler or whether PARCEL, which is the one thing that
+has produced real elasticity on the short grid (§16c), fixes it too. If v13 is flat
+like v6, the long ladder is dead regardless of resampler choice. If v13 shows a
+gradient at the high end that v6 didn't, PARCEL's elasticity effect generalizes beyond
+the range it has been tested on so far.
+
+**Standing decision (2026-09-10), tied to §16g's threshold: if decorrelation is shown
+to help, add it to v13 too, not just adopt it as a general default.** §16g already
+covers promoting decorrelation project-wide if v9 beats v8 by its stated bar (a
+consistent gain across benchmarks and levels, not a single sub-stderr cell); this is
+the same trigger, called out separately because v13 is easy to overlook when that
+decision gets acted on — it is a *second* already-running experiment, not a future
+recipe someone will naturally think to update.
+
+**Action when the trigger fires** (do not wait for a fresh submission to "pick it up" —
+job 27393/27394 were submitted with `USE_TOKEN_DECORRELATION=False` already baked in;
+`sbatch` captures the environment at submit time, so the running/queued job will not
+see a later change to the recipe file):
+
+1. Confirm v9 clears §16g's bar against v8 (and, once it reports, against v11 — v11 is
+   the cleaner control for this specific flag, isolating decorrelation with vision LoRA
+   held off in both, vs. v8 which also differs by vision LoRA).
+2. Edit `submit_elastic_run.sh`'s `v13-parcel-longladder` case block:
+   `USE_TOKEN_DECORRELATION=False` → `True`, keep `DECORR_WEIGHT` at its 0.01 default
+   (v9's value) unless v9's own result suggests retuning it.
+3. If 27393/27394 have not started: `scancel 27393 27394` and resubmit with
+   `bash submit_elastic_run.sh v13-parcel-longladder`. If 27393 has already started
+   training under the old flag, decide whether to let it finish as the "no decorr" data
+   point and launch the decorr-on version as a new tag (e.g. `v13b`) instead of
+   interrupting a multi-day run partway through.

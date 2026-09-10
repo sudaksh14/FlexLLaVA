@@ -149,8 +149,52 @@ case "$RUN" in
     echo "        top of the student and is not ZeRO-sharded; verify headroom on"
     echo "        the target GPU and override GRES for that cluster's card names."
     ;;
+  v13-parcel-longladder)
+    # v11's flags (PARCEL, decorrelation off, vision LoRA off) on v6-tokrange's
+    # 8-level 576-16 ladder instead of v8/v9/v10/v11's 4-level grid.
+    #
+    # Why: v6 (resampler_arch=query) showed the extended ladder is flat and, on
+    # the 256-16 sub-range it shares with the short grid, LESS elastic than v4's
+    # own short-grid result (docs/EXPERIMENT_JOURNAL.md section 16b). v8-parcel
+    # is the one thing that has produced real elasticity on the short grid
+    # (section 16c). This run asks whether PARCEL fixes the long-ladder failure
+    # or whether the failure is orthogonal to the resampler architecture.
+    #
+    # NOT free: kl_teacher_tok_level defaults to index 0, and by convention
+    # index 0 is the LARGEST tok_levels entry -- the teacher forward pass at
+    # that level runs on EVERY step, unlike the single randomly sampled student
+    # (n_sample_students=1) whose cost is normally ladder-length-independent.
+    # Here index 0 is 576, not 256, so every step's teacher pass is ~2x the
+    # v8/v9/v10/v11 cost (matches v6's own measured 1.315 vs 0.639 TFLOPs), and
+    # the average sampled-student cost rises too (student pool is {512 448 384
+    # 256 144 64 16}, mean ~261 tok, vs {144 64 16}, mean ~75 tok, on the short
+    # grid). Stage 1 also runs at 576 tok instead of 256. Real added wall-clock
+    # on top of the ~85h short-grid runtime -- not measured precisely, only
+    # bounded by the ~2x FLOPs ratio; if this run needs to be time-boxed,
+    # measure a few steps first rather than assuming a multiplier.
+    #
+    # LORA_RANKS mirrors v6's own convention exactly (ranks ascend as budget
+    # descends, max stays 64) SPECIFICALLY so the four levels this ladder
+    # shares with v8/v9/v10/v11 (256/144/64/16) carry the identical ranks
+    # those runs use -- keeping that 4-point comparison uncontaminated by a
+    # rank confound, on top of the resampler-architecture question this run
+    # actually asks.
+    export ELASTIC_RUN_TAG=v13-parcel-longladder
+    export TOK_LEVELS="576 512 448 384 256 144 64 16"
+    export LORA_RANKS="2 4 6 8 8 16 32 64"
+    export STAGE1_TOK_LEVEL=576
+    export STAGE1_LORA_RANK=64
+    export USE_TOKEN_DECORRELATION=False
+    export VISION_LORA_ENABLE=False
+    # STANDING TODO (docs/EXPERIMENT_JOURNAL.md section 16j, decision 33): if v9
+    # proves decorrelation helps (checked against v8 AND v11), flip the line
+    # above to True and DECORR_WEIGHT stays 0.01 unless v9 says otherwise --
+    # then cancel+resubmit jobs 27393/27394 (or their successors), since
+    # sbatch already captured USE_TOKEN_DECORRELATION=False into their
+    # environment at submit time and won't pick up a later edit here.
+    ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder}" >&2
     exit 1
     ;;
 esac
