@@ -3,3 +3,4 @@ submitted_utc	recipe	slm_key	train_job	eval_job	tok_levels	lora_ranks	resampler	
 2026-09-09T13:49:55Z	v10-parcel-lora16	tinyllama	27384	27385	256 144 64 16	16 16 16 16	pool_anchored	False	True	False	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-v10-parcel-lora16
 2026-09-09T13:49:55Z	v11-parcel-nolora	tinyllama	27386	27387	256 144 64 16	8 16 32 64	pool_anchored	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-v11-parcel-nolora
 2026-09-10T11:31:40Z	v13-parcel-longladder	tinyllama	27393	27394	576 512 448 384 256 144 64 16	2 4 6 8 8 16 32 64	pool_anchored	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-v13-parcel-longladder
+2026-09-13T12:21:43Z	v14-parcel-asclora	tinyllama	27406	27407	256 144 64 16	64 32 16 8	pool_anchored	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-v14-parcel-asclora

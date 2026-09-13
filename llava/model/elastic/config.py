@@ -181,7 +181,10 @@ class ElasticConfig:
             return -1
         if self.lora_specialize_tok:
             return min(l_tok, len(self.lora_ranks) - 1)
-        return len(self.lora_ranks) - 1   # shared adapter
+        # Shared adapter = the max-rank entry. Was `len-1` (the last entry),
+        # which is only the max when ranks ascend; with v14's descending order
+        # that would silently pick rank 8 for a "max rank" shared adapter.
+        return max(range(len(self.lora_ranks)), key=lambda i: self.lora_ranks[i])
 
     @property
     def is_pooling(self) -> bool:

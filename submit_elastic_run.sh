@@ -186,15 +186,81 @@ case "$RUN" in
     export STAGE1_LORA_RANK=64
     export USE_TOKEN_DECORRELATION=False
     export VISION_LORA_ENABLE=False
-    # STANDING TODO (docs/EXPERIMENT_JOURNAL.md section 16j, decision 33): if v9
-    # proves decorrelation helps (checked against v8 AND v11), flip the line
-    # above to True and DECORR_WEIGHT stays 0.01 unless v9 says otherwise --
-    # then cancel+resubmit jobs 27393/27394 (or their successors), since
-    # sbatch already captured USE_TOKEN_DECORRELATION=False into their
-    # environment at submit time and won't pick up a later edit here.
+    # RESOLVED 2026-09-13 (section 16l, decision 33 closed): decorrelation
+    # stays OFF. The clean isolation v9 (decorr on) vs hipster v11 (decorr off),
+    # PARCEL + no vision LoRA in both, is negative at 256 tok -- POPE -3.12,
+    # TextVQA -2.60, GQA -2.07 -- and it flattens the ladder (TextVQA spread
+    # 0.44 vs 10.09). Nothing to flip; leave this run as submitted.
+    ;;
+  final-parcel)
+    # THE FINAL PAPER RECIPE (docs/EXPERIMENT_JOURNAL.md section 16l + the
+    # "Final best config" block at the end of section 16). This is v8-parcel,
+    # verbatim, made backbone-parametrisable: run it with SLM_KEY=<backbone>
+    # for every SLM in the paper, INCLUDING tinyllama again -- that re-run is
+    # the seed/cluster replicate of v8 the paper does not yet have.
+    #
+    # Every choice below is the winner of a single-flag isolation on TinyLlama:
+    #   PARCEL vs query        v11 vs v4   -> PARCEL creates the budget gradient
+    #   nested LoRA vs none    v8  vs v11  -> +6.3 TextVQA / +2.1 GQA @256, lifts
+    #                                        the whole curve; costs ~2 SciQA
+    #   shared r16 vs none     v10 vs v11  -> shared adapter is WORSE than none
+    #                                        at 256 tok: per-level nesting is
+    #                                        the point, not adapter capacity
+    #   decorr on vs off       v9  vs v11  -> negative (see v13 note above)
+    #   7B KD vs self          v12 vs v11  -> negative everywhere, TextVQA -6.4
+    #   CORAL                  never tested on; not introduced into the final
+    #                          sweep on purpose
+    #   anchor fixed vs ratio  identical at ratio 0.25 on this grid (v8's
+    #                          64/36/16/4 table IS 0.25); ratio kept because it
+    #                          generalises if the grid ever changes
+    #
+    # NOTE the launcher default VISION_LORA_ENABLE is False (flipped 2026-09-09
+    # on the v4-vs-v5 result, which was measured on the plain query resampler).
+    # Under PARCEL the sign reverses, so this recipe sets it True explicitly.
+    # Do not rely on the launcher default for any final-sweep run.
+    export ELASTIC_RUN_TAG=final-parcel
+    export TOK_LEVELS="256 144 64 16"
+    export LORA_RANKS="8 16 32 64"
+    export STAGE1_TOK_LEVEL=256
+    export STAGE1_LORA_RANK=64
+    export VISION_LORA_ENABLE=True
+    export VISION_LORA_SPECIALIZE_TOK=True
+    export USE_TOKEN_DECORRELATION=False
+    export TEACHER=self
+    ;;
+  v14-parcel-asclora)
+    # v8 with the LoRA-rank ladder REVERSED so rank follows budget:
+    #   v8 :  256->r8   144->r16  64->r32  16->r64   (largest budget, smallest rank)
+    #   v14:  256->r64  144->r32  64->r16  16->r8    (rank grows with budget)
+    # Everything else identical to v8 / final-parcel.
+    #
+    # Why: the vision-LoRA arm comparison (EXPERIMENT_JOURNAL 16m: none -> shared
+    # r16 -> nested) shows per-level nesting is what makes the adapter help at
+    # every budget. v8's pairing was a convention ("small budgets need more
+    # adaptation to compensate"), never ablated. The competing hypothesis is
+    # that the 256-token level -- the teacher, and the level carrying the most
+    # information -- should get the most adapter capacity, with the 16-token
+    # level's rank-8 barely perturbing CLIP. v14 tests that directly.
+    #
+    # Second thing this flips, inherent to the reversal, not a separate flag:
+    # Stage 1 trains a rank-64 adapter at 256 tok. In v8, Stage 2's 256 level
+    # then uses only the first 8 columns of that warm start; in v14 it uses all
+    # 64, so the teacher level's warm start is finally consistent end to end.
+    #
+    # Requires the 2026-09-13 NestedLoRALinear change (max_rank = max(ranks),
+    # no ascending assert) -- validated by jobs/test_lora_rank_order.sh.
+    export ELASTIC_RUN_TAG=v14-parcel-asclora
+    export TOK_LEVELS="256 144 64 16"
+    export LORA_RANKS="64 32 16 8"
+    export STAGE1_TOK_LEVEL=256
+    export STAGE1_LORA_RANK=64
+    export VISION_LORA_ENABLE=True
+    export VISION_LORA_SPECIALIZE_TOK=True
+    export USE_TOKEN_DECORRELATION=False
+    export TEACHER=self
     ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel}" >&2
     exit 1
     ;;
 esac

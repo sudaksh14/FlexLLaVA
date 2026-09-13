@@ -1,0 +1,13 @@
+checkpoint,tok_level,n_visual_tokens,mme_perception,mme_cognition,pope_acc,pope_f1,sciqa_img,textvqa_val,gqa,prefill_tflops,run_dir
+elastic-finetune-smollm2-v11-parcel-nolora,256tok,256,1184.91,263.93,82.27,80.59,55.08,15.82,51.55,1.041,0913_1437_elastic_256tok_llava_elastic_model_args_367a3f
+elastic-finetune-smollm2-v11-parcel-nolora,144tok,144,1189.76,245.36,82.38,80.9,56.67,14.71,51.27,0.668,0913_1437_elastic_144tok_llava_elastic_model_args_0132ba
+elastic-finetune-smollm2-v11-parcel-nolora,64tok,64,1197.35,263.57,81.32,79.25,58.4,13.1,50.22,0.405,0913_1437_elastic_64tok_llava_elastic_model_args_3b78c9
+elastic-finetune-smollm2-v11-parcel-nolora,16tok,16,1077.3,258.57,79.26,77.61,56.32,11.15,47.54,0.249,0913_1437_elastic_16tok_llava_elastic_model_args_6aade9
+elastic-finetune-tinyllama-v11-parcel-nolora,256tok,256,1086.63,235.36,83.52,82.13,50.22,22.18,53.95,0.639,0913_1900_elastic_256tok_llava_elastic_model_args_e7214d
+elastic-finetune-tinyllama-v11-parcel-nolora,144tok,144,1116.76,224.29,83.49,82.48,50.37,19.28,53.59,0.411,0913_1900_elastic_144tok_llava_elastic_model_args_a13a05
+elastic-finetune-tinyllama-v11-parcel-nolora,64tok,64,1101.43,212.5,82.41,81.14,49.58,16.23,52.49,0.251,0913_1900_elastic_64tok_llava_elastic_model_args_dfa445
+elastic-finetune-tinyllama-v11-parcel-nolora,16tok,16,986.68,193.21,79.66,77.64,47.5,12.09,50.29,0.156,0912_2258_elastic_16tok_llava_elastic_model_args_5e67c0
+elastic-finetune-tinyllama-v12-parcel-kd7b,256tok,256,1055.96,241.79,80.23,78.4,50.02,15.77,51.65,0.639,0913_1908_elastic_256tok_llava_elastic_model_args_8d0aef
+elastic-finetune-tinyllama-v12-parcel-kd7b,144tok,144,1089.83,241.07,80.46,79.25,49.53,14.5,50.86,0.411,0913_1922_elastic_144tok_llava_elastic_model_args_f151b0
+elastic-finetune-tinyllama-v12-parcel-kd7b,64tok,64,1063.41,217.86,80.32,78.98,48.49,13.34,50.55,0.251,0913_1925_elastic_64tok_llava_elastic_model_args_968234
+elastic-finetune-tinyllama-v12-parcel-kd7b,16tok,16,999.02,234.64,78.54,76.38,47.0,10.45,48.88,0.156,0913_1928_elastic_16tok_llava_elastic_model_args_20fe39

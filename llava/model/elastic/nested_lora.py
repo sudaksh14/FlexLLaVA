@@ -19,13 +19,19 @@ import torch.nn.functional as F
 class NestedLoRALinear(nn.Module):
     def __init__(self, base: nn.Linear, ranks, alpha: float = 1.0, dropout: float = 0.0):
         super().__init__()
-        assert list(ranks) == sorted(ranks), "ranks must be ascending (nested)"
+        # Ranks may be in ANY order. Nesting is a property of the prefix slice
+        # (A[:, :r] @ B[:r]), which holds for every r <= max regardless of how
+        # ranks are assigned to levels -- the old "must be ascending" assert
+        # only encoded v4-v8's convention (largest budget -> smallest rank),
+        # not a structural requirement. v14 (2026-09-13) flips that convention
+        # so rank follows budget (256->64 ... 16->8); see EXPERIMENT_JOURNAL 16m.
+        assert len(ranks) > 0 and all(int(r) > 0 for r in ranks), "ranks must be positive ints"
         self.base = base
         for p in self.base.parameters():
             p.requires_grad_(False)
 
         self.ranks = list(ranks)
-        self.max_rank = self.ranks[-1]
+        self.max_rank = max(self.ranks)   # NOT ranks[-1]: order is no longer assumed
         self.alpha = alpha
         self.level = len(self.ranks) - 1  # default: full rank
 
