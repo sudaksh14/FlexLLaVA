@@ -50,7 +50,9 @@ OUTPUT_DIR="${CHECKPOINT_ROOT}/elastic-finetune-${LLM_KEY}${TAG}"
 LOG_DIR="${SAVE_ROOT}/logs/elastic-finetune-${LLM_KEY}${TAG}"
 RUN_NAME="elastic-finetune-${LLM_KEY}-tok256-144-64-16${TAG}-hipster"
 
-NUM_GPUS="${NUM_GPUS:-2}"
+# FT stage default bumped 2 -> 4 GPUs per 2026-09-14 decision (pretrain stage
+# is untouched, stays at 2 -- see pretrain_elastic_slm_hipster.sh).
+NUM_GPUS="${NUM_GPUS:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-$(( 32 * 2 / NUM_GPUS ))}"
 echo "[FlexLLaVA] num_gpus=${NUM_GPUS}  grad_accum=${GRAD_ACCUM}  (effective batch unchanged)"
 echo "[FlexLLaVA] Finetune  LLM=${MODEL_PATH}  conv=${CONV_VERSION}"

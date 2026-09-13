@@ -60,7 +60,12 @@ case "$KD_GRES_PARTITION" in
   performance) KD_GRES_TYPE=rtx_6000_ada ;;
   *) echo "ERROR: KD_GRES_PARTITION must be capacity|performance" >&2; exit 1 ;;
 esac
-NUM_GPUS=2
+NUM_GPUS_PRETRAIN=2
+# FT stage on 4 GPUs per 2026-09-14 decision -- pretrain stays at 2 (untouched,
+# not part of that request). GRAD_ACCUM in finetune_elastic_slm_hipster.sh is
+# already NUM_GPUS-derived (32*2/NUM_GPUS), so effective batch size is
+# unaffected by this change.
+NUM_GPUS_FT=4
 CPUS_PER_GPU_CAPACITY=16
 CPUS_PER_GPU_PERFORMANCE=32
 
@@ -79,7 +84,7 @@ submit_one() {
     local key="$1" lora="$2" kd="$3" teacher="$4" tag="$5" partition="$6" gres_type="$7"
     local nest; [ "$lora" = "v8" ] && nest=v8 || nest=v14
     local ck=/scratch/skalra/flexllava_saves/checkpoints/elastic-finetune-${key}-${tag}
-    local gres="gpu:${gres_type}:${NUM_GPUS}"
+    local gres="gpu:${gres_type}:${NUM_GPUS_FT}"
     local cpus_per_gpu; cpus_per_gpu=$(cpus_for "$partition")
     printf '  %-12s lora=%-4s kd=%-3s teacher=%-8s partition=%-11s -> %s\n' \
         "$key" "$lora" "$kd" "$teacher" "$partition" "$tag"
@@ -121,8 +126,9 @@ submit_one() {
                 STAGE1_TOK_LEVEL=256 STAGE1_LORA_RANK=64 \
                 RESAMPLER_ARCH=pool_anchored ANCHOR_MODE=ratio ANCHOR_RATIO=0.25 \
                 VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True \
-                sbatch --parsable --partition="$GRES_PARTITION" --gres="gpu:${GRES_TYPE}:${NUM_GPUS}" \
-                --ntasks-per-node="$NUM_GPUS" --cpus-per-task="$(cpus_for "$GRES_PARTITION")" \
+                NUM_GPUS=$NUM_GPUS_PRETRAIN \
+                sbatch --parsable --partition="$GRES_PARTITION" --gres="gpu:${GRES_TYPE}:${NUM_GPUS_PRETRAIN}" \
+                --ntasks-per-node="$NUM_GPUS_PRETRAIN" --cpus-per-task="$(cpus_for "$GRES_PARTITION")" \
                 run_job_pretrain_only_hipster.sh "$key")
             echo "      stage1 (shared)  : ${STAGE1_JOB[$key]}"
         fi
@@ -155,8 +161,9 @@ submit_one() {
         VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True \
         USE_TOKEN_DECORRELATION=False \
         USE_KD=$kd KD_STUDENT_KEY=$key \
+        NUM_GPUS=$NUM_GPUS_FT \
         sbatch --parsable $dep --partition="$partition" --gres="$gres" \
-        --ntasks-per-node="$NUM_GPUS" --cpus-per-task="$cpus_per_gpu" \
+        --ntasks-per-node="$NUM_GPUS_FT" --cpus-per-task="$cpus_per_gpu" \
         run_job_hipster_finetune_only_das6.sh "$key")
     if [ -z "$jid" ]; then
         echo "ERROR: sbatch did not return a job id for $key/$tag -- not submitting its eval." >&2
