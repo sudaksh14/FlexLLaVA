@@ -40,6 +40,33 @@ class ElasticConfig:
     num_query_tokens: int = 256          # full query bank size (nested_query)
     train_tok_levels: Optional[List[int]] = None  # indices into tok_levels
 
+    # ---- provenance: which named recipe produced this checkpoint -------
+    # Recorded so a checkpoint self-identifies rather than relying on the
+    # directory name. Descriptive, NOT behavioural: nothing branches on these
+    # two fields. train_elastic.py resolves them into lora_ranks (and, if
+    # future versions ever diverge further, into whatever else) BEFORE the
+    # config is built, so a config loaded from disk behaves identically
+    # whether or not these are set.
+    #
+    # nest_version: "v8" | "v14" | None (bespoke / pre-dates the flag).
+    #   As of 2026-09-13 v8 and v14 differ ONLY in the lora_ranks ordering, so
+    #   nest_version is currently redundant with lora_type -- kept because it
+    #   is the stable name for "the whole recipe" if a later version changes
+    #   something lora_type cannot express. See EXPERIMENT_JOURNAL 16o.
+    # lora_type:    "v8" | "asc" | None
+    #   "v8"  -> rank ASCENDS as budget descends: 256->8, 144->16, 64->32, 16->64
+    #   "asc" -> rank ascends WITH budget:        256->64, 144->32, 64->16, 16->8
+    #   Both use the same NestedLoRALinear; only the level->rank assignment
+    #   differs. There is no second LoRA implementation.
+    nest_version: Optional[str] = None
+    lora_type: Optional[str] = None
+    # Which backbone is the student, for KD teacher resolution, and which
+    # teacher that resolution actually picked. resolved_teacher_key is written
+    # BY attach_kd_teacher at attach time, so the checkpoint records the teacher
+    # that was really used rather than the one that was requested.
+    kd_student_key: Optional[str] = None
+    resolved_teacher_key: Optional[str] = None
+
     # ---- LoRA (capacity / specialization, NOT a compute axis) ----------
     use_lora: bool = True
     lora_specialize_tok: bool = True     # tie adapter level to L_tok

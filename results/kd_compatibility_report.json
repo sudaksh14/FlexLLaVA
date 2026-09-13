@@ -1,0 +1,272 @@
+{
+  "kd_mechanism": {
+    "type": "logits KD only (prefix-KL)",
+    "loss": "KL(teacher||student) over vocab, masked to labels != -100",
+    "temperature": 1.0,
+    "temperature_configurable": false,
+    "weight": "prefix_kl_weight (default 0.1), divided by n_active levels",
+    "positions": "assistant-response tokens only, right-aligned",
+    "teacher_visual_budget": "native/full (matryoshka_vis_token_scale=None) = 576 tokens for CLIP-L/336 teachers",
+    "hidden_state_kd": false,
+    "attention_kd": false,
+    "feature_kd": "CORAL exists but is SELF-sourced even with an external teacher; teacher hidden states are never used"
+  },
+  "students": {
+    "tinyllama": {
+      "key": "tinyllama",
+      "llm_checkpoint": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+      "family": "llama",
+      "vocab_size": 32000,
+      "hidden_size": 2048,
+      "conv_template": "v1"
+    },
+    "mobilellama": {
+      "key": "mobilellama",
+      "llm_checkpoint": "mtgv/MobileLLaMA-1.4B-Chat",
+      "family": "mobilellama",
+      "vocab_size": 32000,
+      "hidden_size": 2048,
+      "conv_template": "v1"
+    },
+    "smollm2": {
+      "key": "smollm2",
+      "llm_checkpoint": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+      "family": "smollm",
+      "vocab_size": 49152,
+      "hidden_size": 2048,
+      "conv_template": "chatml"
+    },
+    "qwen0.5b": {
+      "key": "qwen0.5b",
+      "llm_checkpoint": "Qwen/Qwen2.5-0.5B-Instruct",
+      "family": "qwen",
+      "vocab_size": 151936,
+      "hidden_size": 896,
+      "conv_template": "chatml"
+    },
+    "qwen1.5b": {
+      "key": "qwen1.5b",
+      "llm_checkpoint": "Qwen/Qwen2.5-1.5B-Instruct",
+      "family": "qwen",
+      "vocab_size": 151936,
+      "hidden_size": 1536,
+      "conv_template": "chatml"
+    }
+  },
+  "teachers": {
+    "llava7b": {
+      "key": "llava7b",
+      "checkpoint": "liuhaotian/llava-v1.5-7b",
+      "family": "llama",
+      "vocab_size": 32000,
+      "hidden_size": 4096,
+      "architecture": "LlavaLlamaForCausalLM",
+      "vision_tower": "openai/clip-vit-large-patch14-336",
+      "mm_projector": "mlp2x_gelu",
+      "in_local_cache": true,
+      "loadable_as_llava": true,
+      "notes": "The incumbent. Same CLIP-L/336 vision tower and mlp2x_gelu projector family as our students, so teacher and student solve the same multimodal task. Runs at its native 576 visual tokens (matryoshka_vis_token_scale=None). Used by v12."
+    },
+    "mobilevlm2_1.7b": {
+      "key": "mobilevlm2_1.7b",
+      "checkpoint": "mtgv/MobileVLM_V2-1.7B",
+      "family": "mobilellama",
+      "vocab_size": 32000,
+      "hidden_size": 2048,
+      "architecture": "MobileLlamaForCausalLM",
+      "vision_tower": "openai/clip-vit-large-patch14-336",
+      "mm_projector": "ldpnetv2",
+      "in_local_cache": true,
+      "loadable_as_llava": false,
+      "notes": "SMOKE-TESTED 2026-09-13 (job 27411): FAILS to load through LlavaLlamaForCausalLM.from_pretrained with 'ValueError: Unknown projector type: ldpnetv2' -- this repo's projector builder has no ldpnetv2. Family-matched VLM for MobileLLaMA; same CLIP-L/336 tower. Its LLM is MobileLLaMA-1.7B vs the 1.4B student -- only marginally larger, so it is a weak teacher on capacity grounds even where compatible. architecture/model_type is mobilevlm with an ldpnetv2 projector, NOT LlavaLlama+mlp2x_gelu; see loadable_as_llava."
+    },
+    "smolvlm": {
+      "key": "smolvlm",
+      "checkpoint": "HuggingFaceTB/SmolVLM-Instruct",
+      "family": "smollm",
+      "vocab_size": 49155,
+      "hidden_size": 2048,
+      "architecture": "Idefics3ForConditionalGeneration",
+      "vision_tower": "idefics3 SigLIP (1152-d)",
+      "mm_projector": "idefics3 connector",
+      "in_local_cache": true,
+      "loadable_as_llava": false,
+      "notes": "SMOKE-TESTED 2026-09-13 (job 27411): FAILS to load through the LLaVA path -- 'Trying to set a tensor of shape [49155, 2048] in weight (which has shape [49155, 4096])'. Family VLM for SmolLM2, BUT: vocab 49155 vs the student's 49152 (3 added image tokens), an Idefics3 architecture the LLaVA loader cannot read, a SigLIP tower rather than CLIP-L/336, and its tokenizer does not even load in this environment (tokenizers version: 'data did not match any variant of untagged enum ModelWrapper'). Three independent blockers."
+    }
+  },
+  "pairs": [
+    {
+      "student": "tinyllama",
+      "teacher": "llava7b",
+      "compatibility": "DIRECT",
+      "runnable_today": true,
+      "reasons": [
+        "hidden 2048 vs 4096 -- irrelevant for logits KD (no hidden-state loss exists here)."
+      ]
+    },
+    {
+      "student": "tinyllama",
+      "teacher": "mobilevlm2_1.7b",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "architecture MobileLlamaForCausalLM cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has.",
+        "cross-family (llama student, mobilellama teacher) -- acceptable only because the tokenizers are byte-identical."
+      ]
+    },
+    {
+      "student": "tinyllama",
+      "teacher": "smolvlm",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 32000 vs 49155: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "architecture Idefics3ForConditionalGeneration cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has.",
+        "cross-family (llama student, smollm teacher) -- acceptable only because the tokenizers are byte-identical."
+      ]
+    },
+    {
+      "student": "mobilellama",
+      "teacher": "llava7b",
+      "compatibility": "DIRECT",
+      "runnable_today": true,
+      "reasons": [
+        "cross-family (mobilellama student, llama teacher) -- acceptable only because the tokenizers are byte-identical.",
+        "hidden 2048 vs 4096 -- irrelevant for logits KD (no hidden-state loss exists here)."
+      ]
+    },
+    {
+      "student": "mobilellama",
+      "teacher": "mobilevlm2_1.7b",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "architecture MobileLlamaForCausalLM cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has."
+      ]
+    },
+    {
+      "student": "mobilellama",
+      "teacher": "smolvlm",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 32000 vs 49155: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "architecture Idefics3ForConditionalGeneration cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has.",
+        "cross-family (mobilellama student, smollm teacher) -- acceptable only because the tokenizers are byte-identical."
+      ]
+    },
+    {
+      "student": "smollm2",
+      "teacher": "llava7b",
+      "compatibility": "VOCAB_MAPPING_REQUIRED",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 49152 vs 32000: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "cross-family (smollm student, llama teacher) -- acceptable only because the tokenizers are byte-identical.",
+        "hidden 2048 vs 4096 -- irrelevant for logits KD (no hidden-state loss exists here)."
+      ]
+    },
+    {
+      "student": "smollm2",
+      "teacher": "mobilevlm2_1.7b",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 49152 vs 32000: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "architecture MobileLlamaForCausalLM cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has.",
+        "cross-family (smollm student, mobilellama teacher) -- acceptable only because the tokenizers are byte-identical."
+      ]
+    },
+    {
+      "student": "smollm2",
+      "teacher": "smolvlm",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 49152 vs 49155: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "architecture Idefics3ForConditionalGeneration cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has."
+      ]
+    },
+    {
+      "student": "qwen0.5b",
+      "teacher": "llava7b",
+      "compatibility": "VOCAB_MAPPING_REQUIRED",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 151936 vs 32000: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "cross-family (qwen student, llama teacher) -- acceptable only because the tokenizers are byte-identical.",
+        "hidden 896 vs 4096 -- irrelevant for logits KD (no hidden-state loss exists here)."
+      ]
+    },
+    {
+      "student": "qwen0.5b",
+      "teacher": "mobilevlm2_1.7b",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 151936 vs 32000: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "architecture MobileLlamaForCausalLM cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has.",
+        "cross-family (qwen student, mobilellama teacher) -- acceptable only because the tokenizers are byte-identical.",
+        "hidden 896 vs 2048 -- irrelevant for logits KD (no hidden-state loss exists here)."
+      ]
+    },
+    {
+      "student": "qwen0.5b",
+      "teacher": "smolvlm",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 151936 vs 49155: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "architecture Idefics3ForConditionalGeneration cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has.",
+        "cross-family (qwen student, smollm teacher) -- acceptable only because the tokenizers are byte-identical.",
+        "hidden 896 vs 2048 -- irrelevant for logits KD (no hidden-state loss exists here)."
+      ]
+    },
+    {
+      "student": "qwen1.5b",
+      "teacher": "llava7b",
+      "compatibility": "VOCAB_MAPPING_REQUIRED",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 151936 vs 32000: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "cross-family (qwen student, llama teacher) -- acceptable only because the tokenizers are byte-identical.",
+        "hidden 1536 vs 4096 -- irrelevant for logits KD (no hidden-state loss exists here)."
+      ]
+    },
+    {
+      "student": "qwen1.5b",
+      "teacher": "mobilevlm2_1.7b",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 151936 vs 32000: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "architecture MobileLlamaForCausalLM cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has.",
+        "cross-family (qwen student, mobilellama teacher) -- acceptable only because the tokenizers are byte-identical.",
+        "hidden 1536 vs 2048 -- irrelevant for logits KD (no hidden-state loss exists here)."
+      ]
+    },
+    {
+      "student": "qwen1.5b",
+      "teacher": "smolvlm",
+      "compatibility": "INCOMPATIBLE",
+      "runnable_today": false,
+      "reasons": [
+        "vocab 151936 vs 49155: prefix_kl_loss reduces over the vocab axis elementwise, so the logits must index the same tokens. attach_kd_teacher raises on this.",
+        "architecture Idefics3ForConditionalGeneration cannot load through LlavaLlamaForCausalLM.from_pretrained, the only path attach_kd_teacher has.",
+        "cross-family (qwen student, smollm teacher) -- acceptable only because the tokenizers are byte-identical.",
+        "hidden 1536 vs 2048 -- irrelevant for logits KD (no hidden-state loss exists here)."
+      ]
+    }
+  ],
+  "auto_resolution": {
+    "tinyllama": "llava7b",
+    "mobilellama": "llava7b",
+    "smollm2": "NONE (--kd_teacher auto found no runnable teacher for student 'smollm2' (family 'smollm').)",
+    "qwen0.5b": "NONE (--kd_teacher auto found no runnable teacher for student 'qwen0.5b' (family 'qwen').)",
+    "qwen1.5b": "NONE (--kd_teacher auto found no runnable teacher for student 'qwen1.5b' (family 'qwen').)"
+  },
+  "no_family_teacher": {
+    "qwen": "No Qwen-family VLM is present in the local HF cache. Qwen2-VL / Qwen2.5-VL exist upstream and share the Qwen2 tokenizer, which would make them the correct candidates -- but nothing has been downloaded or verified here, and this registry does not list checkpoints it has not inspected. Note also that Qwen2.5-0.5B's LM head is 151936 wide while its tokenizer holds 151665 entries; any Qwen KD must confirm the teacher's head width matches the student's exactly.",
+    "smollm": "SmolVLM is the family VLM but is unusable here for three independent reasons -- see TEACHERS['smolvlm'].notes."
+  }
+}

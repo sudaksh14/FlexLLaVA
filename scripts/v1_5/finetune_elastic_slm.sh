@@ -138,7 +138,15 @@ echo "[FlexLLaVA] num_gpus=${NUM_GPUS}  grad_accum=${GRAD_ACCUM}  (effective bat
 echo "[FlexLLaVA] Finetune  LLM=${MODEL_PATH}  conv=${CONV_VERSION}"
 echo "[FlexLLaVA] Pretrain checkpoint → ${PRETRAIN_CKPT}"
 echo "[FlexLLaVA] Output             → ${OUTPUT_DIR}"
-echo "[FlexLLaVA] tok_levels=${TOK_LEVELS:-256 144 64 16}  lora_ranks=${LORA_RANKS:-8 16 32 64}  (override via TOK_LEVELS/LORA_RANKS env vars; keep pretrain_elastic_slm.sh's STAGE1_TOK_LEVEL/STAGE1_LORA_RANK matching this list's first/last entry)"
+# LoRA ladder: set LORA_TYPE (v8|asc) OR LORA_RANKS, not both -- train_elastic.py
+# errors if they contradict, so a checkpoint can never record a lora_type that
+# does not describe its own weights. If NEITHER is set, fall back to the
+# historical explicit ladder so every pre-existing caller behaves identically.
+if [ -z "${LORA_TYPE:-}" ] && [ -z "${NEST_VERSION:-}" ] && [ -z "${LORA_RANKS:-}" ]; then
+    LORA_RANKS="8 16 32 64"
+fi
+echo "[FlexLLaVA] nest_version=${NEST_VERSION:-<unset>}  lora_type=${LORA_TYPE:-<unset>}  lora_ranks=${LORA_RANKS:-<derived from lora_type>}"
+echo "[FlexLLaVA] tok_levels=${TOK_LEVELS:-256 144 64 16}  lora_ranks=${LORA_RANKS:-<derived>}  (override via TOK_LEVELS/LORA_RANKS env vars; keep pretrain_elastic_slm.sh's STAGE1_TOK_LEVEL/STAGE1_LORA_RANK matching this list's first/last entry)"
 # KD teacher. 'self' (default) distills the model at tok_levels[0] into its own
 # smaller levels -- measured KL ~0.004, i.e. contributes ~0.01% of the loss,
 # because teacher and student are the same weights on informationally
@@ -151,18 +159,25 @@ echo "[FlexLLaVA] tok_levels=${TOK_LEVELS:-256 144 64 16}  lora_ranks=${LORA_RAN
 # vocab sizes differ, so this only works for Llama-32000 backbones
 # (tinyllama, mobilellama), NOT smollm2/qwen/phi.
 echo "[FlexLLaVA] vision_lora_enable=${VISION_LORA_ENABLE:-False}  specialize_tok=${VISION_LORA_SPECIALIZE_TOK:-True}  (off by default since 2026-09-09; must match pretrain_elastic_slm.sh)"
+echo "[FlexLLaVA] use_kd=${USE_KD:-True} (prefix-KL SELF-distillation across budgets; teacher and student share weights unless TEACHER=llava)"
 echo "[FlexLLaVA] teacher=${TEACHER:-self}  prefix_kl_weight=${PREFIX_KL_WEIGHT:-0.1}  (TEACHER=llava for the frozen 7B; Llama-vocab backbones only)"
 
 deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --tok_levels ${TOK_LEVELS:-256 144 64 16} \
-    --lora_ranks ${LORA_RANKS:-8 16 32 64} \
+    ${LORA_RANKS:+--lora_ranks ${LORA_RANKS}} \
+    ${LORA_TYPE:+--lora_type ${LORA_TYPE}} \
+    ${NEST_VERSION:+--nest_version ${NEST_VERSION}} \
     --resampler_arch "${RESAMPLER_ARCH:-query}" \
     --anchor_routing "${ANCHOR_ROUTING:-}" \
     --anchor_mode "${ANCHOR_MODE:-ratio}" \
     --anchor_ratio "${ANCHOR_RATIO:-0.25}" \
     --use_token_decorrelation "${USE_TOKEN_DECORRELATION:-False}" \
     --decorr_weight "${DECORR_WEIGHT:-0.01}" \
+    --use_kd "${USE_KD:-True}" \
     --teacher "${TEACHER:-self}" \
+    ${KD_TEACHER:+--kd_teacher ${KD_TEACHER}} \
+    ${KD_STUDENT_KEY:+--kd_student_key ${KD_STUDENT_KEY}} \
+    ${KD_TYPE:+--kd_type ${KD_TYPE}} \
     --teacher_model_path "${TEACHER_MODEL_PATH:-liuhaotian/llava-v1.5-7b}" \
     --prefix_kl_weight "${PREFIX_KL_WEIGHT:-0.1}" \
     --coral_weight 0.1 \

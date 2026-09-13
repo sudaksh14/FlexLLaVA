@@ -40,13 +40,31 @@ def attach_kd_teacher(engine, cfg, student):
     if mode == "self":
         engine.kd_teacher = None
         return None
-    if mode != "llava":
-        raise ValueError(f"unknown teacher={mode!r}; expected 'self' or 'llava'")
 
     import torch as _torch
     from llava.model import LlavaLlamaForCausalLM
 
+    # Teacher resolution. Historically `teacher` was literally "self" | "llava"
+    # with the checkpoint baked into teacher_model_path. It now also accepts a
+    # registry key or "auto", resolved against kd_teachers with an explicit
+    # student backbone -- which is what makes the audit's compatibility verdict
+    # enforceable at run time rather than advisory. "llava" is kept as an alias
+    # for the incumbent 7B so every existing recipe and checkpoint keeps working.
     path = getattr(cfg, "teacher_model_path", "liuhaotian/llava-v1.5-7b")
+    if mode != "llava":
+        from llava.model.elastic import kd_teachers as _kdt
+        student_key = getattr(cfg, "kd_student_key", None)
+        if student_key is None:
+            raise ValueError(
+                f"teacher={mode!r} needs cfg.kd_student_key to resolve against the "
+                f"teacher registry (which backbone is the student?). Pass "
+                f"--kd_student_key, or use teacher='llava' to force the incumbent 7B.")
+        spec = _kdt.resolve_teacher(student_key, mode)   # raises if incompatible
+        path = spec.checkpoint
+        print(f"[elastic] KD teacher resolved: student={student_key} "
+              f"requested={mode!r} -> {spec.key} ({spec.checkpoint})", flush=True)
+        cfg.teacher_model_path = path
+        cfg.resolved_teacher_key = spec.key
     dtype = next(student.parameters()).dtype
     print(f"[elastic] loading frozen KD teacher: {path} ({dtype})", flush=True)
     teacher = LlavaLlamaForCausalLM.from_pretrained(path, torch_dtype=dtype)

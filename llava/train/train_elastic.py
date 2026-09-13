@@ -49,6 +49,7 @@ Usage example:
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -63,6 +64,110 @@ def _get_argv_value(key: str) -> str:
         return sys.argv[idx + 1] if idx + 1 < len(sys.argv) else "?"
     except ValueError:
         return "?"
+
+
+def _write_run_manifest(elastic_args, tok_levels, lora_ranks,
+                        nest_version, lora_type) -> None:
+    """Write run_manifest.json into output_dir: everything needed to reproduce
+    this run, in one file, at launch time.
+
+    elastic_config.json already records the elastic architecture, but not the
+    things that live in HF TrainingArguments or in git -- optimizer, LR,
+    schedule, epochs, batch size, dataset, seed, commit. Reconstructing those
+    later means trusting a launcher script that has since been edited, which is
+    exactly how v8's provenance ended up recoverable only from its checkpoint
+    (see docs/EXPERIMENT_JOURNAL.md 16o). Written once at launch, never
+    updated, so it records what the run STARTED with.
+    """
+    import subprocess, datetime, socket
+    out_dir = _get_argv_value("--output_dir")
+    if out_dir in (None, "?"):
+        return
+
+    def _git(*args, default="unknown"):
+        try:
+            return subprocess.check_output(["git", *args], cwd=os.path.dirname(
+                os.path.abspath(__file__)), stderr=subprocess.DEVNULL).decode().strip()
+        except Exception:
+            return default
+
+    # A dirty tree means the commit hash alone does not identify the code that
+    # ran, so say so rather than recording a hash that is quietly incomplete.
+    dirty = _git("status", "--porcelain", default="")
+    manifest = {
+        "nest_version":     nest_version,
+        "lora_type":        lora_type,
+        "lora_ranks":       list(lora_ranks),
+        "tok_levels":       list(tok_levels),
+        "backbone":         _get_argv_value("--model_name_or_path"),
+        "vision_tower":     _get_argv_value("--vision_tower"),
+        "conv_version":     _get_argv_value("--version"),
+        "kd": {
+            "kd_type":              "logits (prefix-KL); no hidden/attention/response KD exists here",
+            "requested_teacher":    elastic_args.kd_teacher or elastic_args.teacher,
+            "kd_student_key":       elastic_args.kd_student_key,
+            "use_prefix_kl":        elastic_args.use_kd,
+            "prefix_kl_weight":     elastic_args.prefix_kl_weight,
+            "teacher":              elastic_args.teacher,
+            "teacher_model_path":   (elastic_args.teacher_model_path
+                                     if elastic_args.teacher != "self" else None),
+            "kl_teacher_tok_level": 0,
+            "kl_teacher_budget":    tok_levels[0],
+            "distillation_target":  "next-token logits over labelled text positions, "
+                                    "right-aligned (prefix_kl_loss)",
+            "temperature":          "n/a -- prefix_kl_loss uses plain log_softmax KL, "
+                                    "no temperature parameter exists in this codebase",
+            "mechanism":            ("SELF-distillation: teacher is THIS MODEL at "
+                                     "tok_levels[0]; teacher and student share weights "
+                                     "exactly. Measured KL ~0.006."
+                                     if elastic_args.teacher == "self" else
+                                     "EXTERNAL teacher: frozen separate checkpoint, "
+                                     "independent weights."),
+        },
+        "coral":            {"enabled": elastic_args.use_coral,
+                             "weight": elastic_args.coral_weight},
+        "decorrelation":    {"enabled": elastic_args.use_token_decorrelation,
+                             "weight": elastic_args.decorr_weight},
+        "vision_lora":      {"enabled": elastic_args.vision_lora_enable,
+                             "specialize_tok": elastic_args.vision_lora_specialize_tok,
+                             "ranks": list(lora_ranks)},
+        "resampler":        {"arch": elastic_args.resampler_arch,
+                             "anchor_mode": elastic_args.anchor_mode,
+                             "anchor_ratio": elastic_args.anchor_ratio,
+                             "query_selection": elastic_args.query_selection},
+        "n_sample_students": elastic_args.n_sample_students,
+        "use_nested_dropout": elastic_args.use_nested_dropout,
+        "optimizer":        "adamw_torch (HF default)",
+        "learning_rate":    _get_argv_value("--learning_rate"),
+        "scheduler":        _get_argv_value("--lr_scheduler_type"),
+        "warmup_ratio":     _get_argv_value("--warmup_ratio"),
+        "weight_decay":     _get_argv_value("--weight_decay"),
+        "epochs":           _get_argv_value("--num_train_epochs"),
+        "per_device_batch": _get_argv_value("--per_device_train_batch_size"),
+        "grad_accum":       _get_argv_value("--gradient_accumulation_steps"),
+        "seed":             _get_argv_value("--seed"),   # "?" => HF default 42
+        "dataset":          _get_argv_value("--data_path"),
+        "image_folder":     _get_argv_value("--image_folder"),
+        "image_aspect_ratio": _get_argv_value("--image_aspect_ratio"),
+        "model_max_length": _get_argv_value("--model_max_length"),
+        "deepspeed":        _get_argv_value("--deepspeed"),
+        "pretrain_elastic_path": _get_argv_value("--pretrain_elastic_path"),
+        "checkpoint":       out_dir,
+        "git_commit":       _git("rev-parse", "HEAD"),
+        "git_branch":       _git("rev-parse", "--abbrev-ref", "HEAD"),
+        "git_dirty":        bool(dirty),
+        "git_dirty_files":  dirty.splitlines() if dirty else [],
+        "slurm_job_id":     os.environ.get("SLURM_JOB_ID"),
+        "node":             socket.gethostname(),
+        "launched_utc":     datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "run_manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=2)
+        print(f"[elastic] wrote run_manifest.json -> {out_dir}", flush=True)
+    except OSError as e:
+        print(f"[elastic] could not write run_manifest.json: {e}", flush=True)
 
 
 def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
@@ -97,7 +202,8 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         llm_lora_str = "disabled (full fine-tune)"
     if elastic_args.vision_lora_enable:
         vt_lora_str = (
-            f"enabled  (ranks={lora_ranks}, "
+            f"enabled  (lora_type={elastic_args.lora_type or 'explicit ranks'}, "
+            f"ranks={lora_ranks}, "
             f"{'specialized per tok_level' if elastic_args.vision_lora_specialize_tok else 'one shared adapter'})"
         )
     else:
@@ -111,6 +217,7 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         f"  Vision Encoder : {ve}\n"
         f"  LLM            : {llm}\n"
         f"  Token budgets  : {tok_levels}  (teacher = tok{teacher_tok})\n"
+        f"  NEST version   : {elastic_args.nest_version or '(unset)'}   lora_type: {elastic_args.lora_type or '(explicit ranks)'}\n"
         f"  LoRA ranks     : {lora_ranks}\n"
         f"  Training mode  : {mode}\n"
         f"  LLM LoRA       : {llm_lora_str}\n"
@@ -153,8 +260,49 @@ def _parse_elastic_args():
     p = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     p.add_argument("--tok_levels", type=int, nargs="+", default=_DEFAULT_TOK_LEVELS,
                    help="Visual-token budgets per level, descending (e.g. 256 144 64 16).")
-    p.add_argument("--lora_ranks", type=int, nargs="+", default=_DEFAULT_LORA_RANKS,
-                   help="LoRA rank per tok level — must have same length as tok_levels.")
+    p.add_argument("--lora_ranks", type=int, nargs="+", default=None,
+                   help="LoRA rank per tok level — must have same length as tok_levels. "
+                        "Usually left unset: --lora_type derives it. Setting both is an "
+                        "error unless they agree, so a run can never silently disagree "
+                        "with the lora_type recorded in its own checkpoint.")
+    p.add_argument("--lora_type", choices=("v8", "asc"), default=None,
+                   help="Which level->rank assignment to use, over the SAME "
+                        "NestedLoRALinear (there is no second LoRA implementation). "
+                        "'v8'  = rank ascends as budget DESCENDS (256->8 ... 16->64), "
+                        "the v4-v8 convention: small budgets get more adapter. "
+                        "'asc' = rank ascends WITH budget (256->64 ... 16->8), the v14 "
+                        "hypothesis: the teacher level gets the most adapter. "
+                        "Ranks are taken from the geometric ladder 8/16/32/64 for a "
+                        "4-level grid and generalised as powers of two otherwise.")
+    p.add_argument("--kd_teacher", default=None, metavar="KEY",
+                   help="Which KD teacher to use when --use_kd is on and an EXTERNAL "
+                        "teacher is wanted. 'auto' consults the compatibility registry "
+                        "(llava/model/elastic/kd_teachers.py) and picks the preferred "
+                        "family-matched teacher for --kd_student_key, failing LOUDLY if "
+                        "none is runnable. A registry key ('llava7b', 'mobilevlm2_1.7b', "
+                        "...) forces that teacher and still refuses if the audit says it "
+                        "is incompatible. Omit for self-distillation (teacher='self').")
+    p.add_argument("--kd_student_key", default=None, metavar="KEY",
+                   help="Which backbone is the student (tinyllama|mobilellama|smollm2|"
+                        "qwen0.5b|qwen1.5b). Required by --kd_teacher resolution; the "
+                        "launchers pass their own LLM_KEY.")
+    p.add_argument("--kd_type", choices=("auto", "logits"), default="auto",
+                   help="KD mechanism. Only 'logits' (prefix-KL over the vocabulary, "
+                        "masked to assistant-response positions) is implemented -- there "
+                        "is no hidden-state, attention, or response-level KD loss in this "
+                        "repo, and CORAL is self-sourced even with an external teacher. "
+                        "'auto' resolves to 'logits'. The choice list is deliberately "
+                        "short: adding a name here without a loss behind it would let a "
+                        "run claim a KD type it did not perform.")
+    p.add_argument("--nest_version", choices=("v8", "v14"), default=None,
+                   help="Named recipe preset. Currently sets ONLY the default "
+                        "--lora_type (v8->'v8', v14->'asc'), because as of "
+                        "2026-09-13 that is the sole difference between the two "
+                        "recipes — every other component is identical (see "
+                        "docs/EXPERIMENT_JOURNAL.md 16o). An explicit --lora_type "
+                        "overrides it, which is what makes the 2x2 version x lora "
+                        "matrix expressible even though 2 of its 4 cells are "
+                        "duplicates today. Recorded in the checkpoint either way.")
     p.add_argument("--prefix_kl_weight", type=float, default=_DEFAULT_KL_WEIGHT,
                    help="Weight on the prefix-KL self-distillation loss term.")
     p.add_argument("--coral_weight", type=float, default=_DEFAULT_CORAL_WEIGHT,
@@ -271,7 +419,40 @@ def main():
     elastic_args = _parse_elastic_args()
 
     tok_levels   = elastic_args.tok_levels
-    lora_ranks   = elastic_args.lora_ranks
+
+    # --- resolve lora_type / nest_version -> lora_ranks ---------------------
+    # Order: explicit --lora_ranks wins, then --lora_type, then the preset
+    # implied by --nest_version, then the historical default. Whatever is
+    # resolved gets recorded on the ElasticConfig so the checkpoint says which
+    # recipe made it instead of that living only in a directory name.
+    lora_type    = elastic_args.lora_type
+    nest_version = elastic_args.nest_version
+    if lora_type is None and nest_version is not None:
+        lora_type = {"v8": "v8", "v14": "asc"}[nest_version]
+
+    derived = None
+    if lora_type is not None:
+        n = len(tok_levels)
+        # Geometric ladder: 8,16,32,64 for n=4; generalises as 8*2^i so any
+        # grid length works and max(ranks) stays the Stage-1 buffer width.
+        ladder = [8 * (2 ** i) for i in range(n)]
+        # "v8": rank ascends as budget descends -> ladder applied in order,
+        # since tok_levels is descending. "asc": rank ascends WITH budget ->
+        # ladder reversed.
+        derived = ladder if lora_type == "v8" else ladder[::-1]
+
+    if elastic_args.lora_ranks is not None:
+        lora_ranks = elastic_args.lora_ranks
+        if derived is not None and list(lora_ranks) != derived:
+            raise ValueError(
+                f"--lora_ranks {list(lora_ranks)} contradicts --lora_type "
+                f"{lora_type!r} (which implies {derived}). Pass one or the other, "
+                f"or make them agree -- otherwise the checkpoint would record a "
+                f"lora_type that does not describe its own weights.")
+    elif derived is not None:
+        lora_ranks = derived
+    else:
+        lora_ranks = _DEFAULT_LORA_RANKS
 
     if len(lora_ranks) != len(tok_levels):
         raise ValueError(
@@ -281,6 +462,8 @@ def main():
 
     if os.environ.get("LOCAL_RANK", "0") == "0":
         _print_config_banner(elastic_args, tok_levels, lora_ranks)
+        _write_run_manifest(elastic_args, tok_levels, lora_ranks,
+                            nest_version, lora_type)
 
     m3train.ELASTIC_CONFIG = ElasticConfig(
         token_reduction="nested_query",
@@ -290,9 +473,15 @@ def main():
         lora_specialize_tok=elastic_args.vision_lora_specialize_tok,
         lora_ranks=lora_ranks,
         lora_alpha=1.0,
+        nest_version=nest_version,
+        lora_type=lora_type,
+        kd_student_key=elastic_args.kd_student_key,
         use_prefix_kl=elastic_args.use_kd,     prefix_kl_weight=elastic_args.prefix_kl_weight,
         use_coral_align=elastic_args.use_coral, coral_weight=elastic_args.coral_weight,
-        teacher=elastic_args.teacher,
+        # --kd_teacher, when given, becomes cfg.teacher and is resolved against
+        # the registry inside attach_kd_teacher (which has the student model in
+        # hand for the vocab check). Falls back to the historical --teacher.
+        teacher=(elastic_args.kd_teacher or elastic_args.teacher),
         teacher_model_path=elastic_args.teacher_model_path,
         use_pos_embed=elastic_args.use_pos_embed,
         pos_embed_type=elastic_args.pos_embed_type,

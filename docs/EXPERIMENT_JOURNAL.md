@@ -48,6 +48,8 @@ Every decision below is the user's; the "result" column is what actually happene
 | 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
 | 24 | Cluster-wide reboot (all 8 nodes down) interrupted v7-kd7b mid-training and truncated v6-tokrange's eval to 4/8 levels. Cancel v7-kd7b and its eval outright; requeue the missing v6-tokrange levels with the script bug fixed; resize v9-parcel-decorr to fit on A10 (node208) instead of A40 (node205) so node205 stays free; write up the backbone/PARCEL/decorr ablation matrix that doesn't fit locally as a pending-work list for the other ("hipster") cluster. | Done (§15). Found and fixed a real bug in `eval_lmms_level.sh` along the way: `jq`'s availability is inconsistent across compute nodes, so 4 of 8 v6-tokrange eval array tasks silently fell back to a wrong 4-level default and errored out even though `elastic_config.json` was present and correct the whole time — replaced with a `python3`-based parse (env-guaranteed) and a loud failure instead of a silent wrong-grid fallback. v7-kd7b (27299) + its eval (27300) cancelled; v6-tokrange's missing levels (576/512/448/384-token) requeued as job 27375 `--array=4-7`. v9-parcel-decorr requeued as job 27376/27377 with `--gres=gpu:A10:2` (was A40:2) — justified by v8-parcel, the identical architecture minus the decorrelation term, having already completed its full 84.5h run cleanly on node208's A10:2. |
 | 25 | Analyse v6's available eval levels and v8 against the earlier runs and say whether any introduced change actually helped; record the outcome; make **v8 the best working model**; drop rank-nested vision LoRA from all future runs including v9; queue **v10** with vision LoRA fixed at 16 for both stages; re-scope the hipster matrix to the v8 setup with vision LoRA off, stating in that section that v8 is the best-performing config and that vision LoRA is off; rename v6's eval folders correctly and verify the pending evals land in the right ones. | Done (§16). **Yes, one change helped: PARCEL (v8) — the only run with a real budget–accuracy gradient, and the new best model (§16c).** The other two introduced changes lost: rank-nested vision LoRA is a regression on both backbones (§16d, default now False), and the extended 576→16 ladder is a large regression (§16b, retired). Found along the way that §15b's root cause was recorded backwards: *every* task of job 27292 hit the `jq` fallback, so v6's four surviving results were not 256/144/64/16 at all but 576/512/448/384 written under the wrong labels — verified against the measured prefill FLOPs and relabelled (§16a). v9 cancelled and re-scoped onto v8's grid with LoRA off; v10 added; v11 deferred by decision; recipes moved out of submitting-shell env vars into `submit_elastic_run.sh` (+ a `docs/SUBMITTED_RUNS.tsv` job-id→recipe log) in git, after v9's ladder had to be recovered from circumstantial evidence. v9 requeued as 27378/27379 and v10 as 27380/27381, both `--array=0-3`; all 8 nodes were still `down` at submit time, so neither has started. |
+| 39 | Audit KD teacher compatibility per backbone, find family-matched teachers, build teacher-selection infrastructure, and plan the Hipster matrix. Audit first; launch nothing. | Done (§18). **The 7B teacher is valid for MobileLLaMA** (token IDs byte-identical to LLaVA's, verified by loading both tokenizers -- job 27410) and **invalid for SmolLM2 and Qwen** (49152 / 151936 vs 32000). **Neither family-matched teacher is usable**, smoke-tested not assumed (job 27411): MobileVLM_V2 fails with `Unknown projector type: ldpnetv2`; SmolVLM fails on architecture (Idefics3), on vocab (49155 vs the student's own 49152), and its tokenizer does not even load in this env. No Qwen VLM is in the local cache. Audited the KD mechanism itself: **logits KD only**, T hard-coded 1.0, weight 0.1/n_active, assistant-response positions only, teacher at full 576 visual tokens, CORAL self-sourced even with an external teacher, and `attach_kd_teacher` hard-codes the LLaVA-Llama loader. Built `kd_teachers.py` (registry + compatibility levels) wired into `attach_kd_teacher` so incompatible pairs are **refused, never substituted**; added `--kd_teacher/--kd_student_key/--kd_type`. Matrix is 12 core + 2 external-teacher, all **PLANNED**, nothing submitted. |
+| 38 | Rigorously determine whether v14 beats v8, then build a controlled Hipster matrix (2 versions x 3 backbones x 2 LoRA x 2 KD); add a single `--lora-type` and an explicit version argument; run KD for all three backbones; verify what KD actually is. | Done (§17). **Existing evidence is insufficient for a controlled v8-v14 comparison: v14 has no results at all** -- job 27406 is ~9h into a ~85h run, no checkpoint, no eval dir. Audit found v8 and v14 differ in **exactly one** component, the LoRA rank ladder; the anchor-config difference (fixed table vs ratio 0.25) is verified behaviourally identical, and the `acdfa79` code delta that landed mid-v8-run is verified inert (decorrelation-gated). Two consequences for the matrix: **version and LoRA are the same axis**, so 24 cells collapse to 12 distinct ones (+2 external-teacher); and **external-teacher KD is impossible on SmolLM2 (vocab 49152) and Qwen (151936)** against the 32000-vocab LLaVA-7B teacher, so the KD column is prefix-KL *self*-distillation (shared weights, KL ~0.006) and genuine KD is a MobileLLaMA-only arm. Added `--lora_type {v8,asc}` and `--nest_version {v8,v14}` propagating to checkpoint metadata, plus `run_manifest.json` with git hash; `run_matrix_hipster.sh` is the reproducible driver (dry-run by default). Nothing submitted. |
 | 37 | Research only: would a fixed rank-64 shared adapter help, given shared r16 (v10) did not? Can more rank help? | No, predicted from existing data (§16n), not queued. At 256 tok v8's *rank-8* nested level beats v10's *rank-16* shared adapter by 8.5 TextVQA — the smaller adapter wins, so capacity is not the shortfall. At 16 tok shared r16 already captures 94% of nested r64's TextVQA gain — nothing left for rank to buy. What separates them is the nested prefix's **quarantine**: the 256-token forward reads and trains only columns 1–8, so the 16-token level's aggressive adaptation is confined to columns 9–64 the teacher never sees; a budget-blind shared adapter has no partition, and more rank gives the student objective more room to reshape the columns the teacher must read through. Prediction: shared r64 regresses the top end further. Offered as a hipster row if the paper wants "rank is not the variable" shown rather than argued; the run that actually tests top-level capacity is v14. |
 | 36 | Add a journal section isolating the vision-LoRA axis (none → fixed r16 → nested); set up v14 = v8's nested LoRA with the rank ladder reversed so rank follows token budget; cancel the running local v11. | Done (§16m). The three-arm table (v11 / v10 / v8, all PARCEL + decorr off) shows the adapter effect is **non-monotone in capacity** — a shared r16 adapter is worse than none at 256 tok (TextVQA 19.96 vs 22.18) while lifting the 16-tok floor by +7; nesting lifts both ends. SciQA is paid by nesting specifically (48.14 vs 50.2–50.5 for the other two). **v14-parcel-asclora** = v8 with `LORA_RANKS 64 32 16 8`, everything else identical; queued as **27406/27407** on node205. Required a code change — `NestedLoRALinear` asserted ascending ranks and took `max_rank = ranks[-1]`, neither structural; now `max(ranks)`, and the shared-adapter index in `ElasticConfig` picks the max entry rather than the last. Validated by `jobs/test_lora_rank_order.sh` (27405, `ALL_TESTS_PASSED`) incl. the `[64]`→`[64,32,16,8]` warm start, where the teacher level now uses all 64 columns (v8 used 8 — an inherent second difference, noted in §16m). Renamed last turn's `v14-final-parcel` sweep recipe to `final-parcel` to free the v14 name. Local v11 (27386) + eval (27387) cancelled at ~1d19h; its partial checkpoints left on disk; hipster v11 remains the reference. |
 | 35 | With hipster v11/v12 in (`results/hipster_eval_summary.csv`): analyze all runs; name the final best config across vision LoRA / decorr / CORAL / KD / PARCEL fixed-vs-ratio; pick the recipe for every other SLM backbone; say whether a 576-token teacher or the full ladder helps; write the best config at the end of the journal explicitly. | Done (§16l + the "FINAL BEST CONFIG" block ending §16). **Final recipe = v8, verbatim** — PARCEL ratio-0.25, rank-nested vision LoRA `8 16 32 64`, decorr off, CORAL off, self-teacher, 4-level grid — now `final-parcel` in `submit_elastic_run.sh`, `SLM_KEY`-parametrised. Every axis has a clean single-flag isolation against hipster v11: PARCEL creates the gradient (v11 vs v4), nested LoRA lifts the whole curve (+6.3 TextVQA / +2.1 GQA @256, v8 vs v11), a shared r16 adapter is *worse* than none at 256 (v10 vs v11), decorrelation is negative (v9 vs v11, §16g and decision 33 closed), the 7B KD teacher is negative everywhere (v12 vs v11, TextVQA −6.4). CORAL was never on in any run; fixed vs ratio anchors are identical at 0.25 on this grid — neither is an evidenced choice. v8 wins 4/5 metrics at all four budgets; SciQA −2..−3 is the constant cost, monotone in adapter capacity across six runs. Flagged that "elasticity" as a spread rewards a bad floor — v11's larger spread comes from collapsing at 16 tok — so the paper must report the frontier. 576-teacher / full ladder: no data (v13 12h in); prior evidence negative (v6 flat; self-KL ~0 means teacher "strength" is not the lever; the one real-signal teacher, v12, hurt). §16f's v11-based hipster plan superseded: SmolLM2 v11 cost TextVQA −9.6 vs its v4. Sweep must re-run tinyllama under the final tag as the seed replicate. |
@@ -2058,3 +2060,344 @@ is v14 (256→r64, nested, quarantine intact), already running. The cheaper abla
 worth more than shared-r64, if a slot opens: nested with a **smaller** max
 (`4 8 12 16`) — keeps the partition, cuts adapter parameters 4×, and point 2 predicts
 it loses little; that is an efficiency-story row, not a capacity one.
+
+
+## 17. Controlled v8-vs-v14 audit, and the Hipster experiment matrix (decision 38)
+
+### 16o/17a. What actually differs between v8 and v14
+
+Audited from the checkpoints' own `elastic_config.json`, the launcher scripts, and
+`git log` — not from the version numbers.
+
+| Component | v8 | v14 | Same/Different |
+|---|---|---|---|
+| model architecture | LLaVA + nested-query elastic engine | same | **Same** |
+| visual-token reduction | `nested_query`, budgets 256/144/64/16 | same | **Same** |
+| resampler | `pool_anchored` (PARCEL) | same | **Same** |
+| spatial anchors | `anchor_routing {256:64,144:36,64:16,16:4}` | `anchor_mode=ratio, ratio=0.25` | **Same behaviour** — verified in code (job 27408): ratio 0.25 resolves to exactly 64/36/16/4 at these four budgets; nested dropout is off, so no other budget is ever requested |
+| learned local-detail queries | budget − anchors, `query_selection=prefix` | same | **Same** |
+| decorrelation loss | off | off | **Same** |
+| CORAL | off (`use_coral_align=false`) | off | **Same** |
+| KD | `use_prefix_kl=true`, `teacher=self`, weight 0.1 | same | **Same** |
+| **LoRA rank ladder** | **`8 16 32 64`** (rank ascends as budget descends) | **`64 32 16 8`** (rank ascends with budget) | **DIFFERENT — the only one** |
+| LoRA everything else | nested, `specialize_tok=true`, alpha 1.0, dropout 0.0 | same | **Same** |
+| Stage-1 warm start | `tok_level 256`, `lora_rank 64` | same | **Same recipe**, but *consumed* differently: v8's 256 level reads only columns 1–8 of the rank-64 Stage-1 adapter, v14's reads all 64 (inherent to the flip, not a second knob) |
+| training objective | CE + prefix-KL | same | **Same** |
+| optimizer | adamw_torch, LR 2e-5, cosine, warmup 0.03, wd 0 | same | **Same** |
+| token budgets | 256/144/64/16 | same | **Same** |
+| frozen/trainable | LLM full FT, CLIP frozen + LoRA, ZeRO-2 | same | **Same** |
+| data | `llava_v1_5_mix665k.json` | same | **Same** |
+| augmentation | `image_aspect_ratio=pad`, no other aug | same | **Same** |
+| training duration | 1 epoch, bs 2 × accum 32 × 2 GPU | same | **Same** |
+| seed | unset → HF default 42 | same | **Same** |
+| evaluation protocol | `eval_lmms_level.sh`, 5 benchmarks, `--array=0-3` | same | **Same** |
+| model code | pre-`acdfa79` resampler | post-`acdfa79` | **Same behaviour** — `acdfa79` landed 2026-09-08 16:06 while v8 was mid-run (launched Sep 5), so the two ran different source. Audited: the resampler diff only *adds* `anchor_mode`/`anchor_ratio` with ratio-0.25 reproducing the old `budget // 4`, and the mixin diff is entirely inside `if cfg.use_token_decorrelation:`, which is False in both |
+| hardware | node208, A10:2 | node205, A40:2 | **Different** — no code path branches on GPU type and batch sizes are constants, so the recipe is identical; numerics are not bitwise reproducible across cards |
+
+**Verdict on existing evidence:**
+
+> **Existing evidence is insufficient for a controlled v8-v14 comparison.**
+
+v14 (job 27406) started 2026-09-13 and is ~9h into a ~85h Stage-2 run. It has produced
+no checkpoint and no eval. `eval_logs/` contains no `v14` directory. There is **no v14
+number of any kind**, on any metric, on any backbone. Nothing can yet be said about
+`V14 > V8`, `V14 ≈ V8`, or `V14 < V8`.
+
+What the audit *does* establish, which matters for when v14 lands: once it does, the
+comparison against v8 will be a clean single-variable one. The only differences are the
+rank ladder (intended), the GPU model (uncontrolled but not recipe-affecting), and a
+code delta verified inert. The anchor-config difference looked like a confound and is
+not one.
+
+Two honest caveats to carry into that comparison: both runs are **n=1**, and the
+Stage-1 consumption difference in the table above rides along with the flip — if v14
+wins, the ladder direction and the warm-start consistency are not separable without a
+third run.
+
+### 17b. What "KD" means in this codebase
+
+Checked against the code rather than the name. There are **two different mechanisms**,
+and only one is available on all backbones.
+
+**(a) `--use_kd` → `cfg.use_prefix_kl` — prefix-KL SELF-distillation across token
+budgets.** The teacher is *this model* at `tok_levels[kl_teacher_tok_level]` = index 0
+= 256 tokens; its logits are detached and the smaller budgets are trained toward them
+(`llava_elastic_mixin.py:325-345`). **Teacher and student share weights exactly** — one
+network compared against itself on a longer visual prefix. Measured KL ≈ 0.006, about
+0.01% of the loss (§5b), because the inputs are informationally near-equivalent. With
+`teacher=self` the teacher level receives no KL itself; only the sampled students do.
+
+This is what the matrix's KD column toggles. **It is not an independent-teacher
+comparison and must not be reported as one.**
+
+**(b) `--teacher llava` → a frozen external LLaVA-1.5-7B**, independent weights, one
+no-grad forward per step, 576 visual tokens, right-aligned so the labelled text
+positions match (`engine.attach_kd_teacher`). Every level becomes a student including
+256. This is genuine KD — and it is **gated on tokenizer identity**:
+`attach_kd_teacher` raises when `teacher.config.vocab_size != student.config.vocab_size`.
+
+| backbone | vocab | external-teacher KD |
+|---|---|---|
+| TinyLlama | 32000 | possible |
+| MobileLLaMA | 32000 | possible |
+| SmolLM2 | 49152 | **impossible** |
+| Qwen2.5 (0.5B/1.5B/3B) | 151936 | **impossible** |
+| *LLaVA-1.5-7B teacher* | *32000* | — |
+
+So genuine KD cannot be run on SmolLM2 or Qwen with the teacher this repo has. It is
+kept as a **separate MobileLLaMA-only arm**, not folded into the matrix, because a "KD"
+column meaning self-distillation for two backbones and external-teacher KD for a third
+would be uninterpretable. Prior evidence: v12 (external KD, TinyLlama) lost to its
+control on every metric at every budget (§16l), at an untuned `prefix_kl_weight` of 0.1.
+
+There is no KD *temperature* in this codebase — `prefix_kl_loss` is a plain
+log-softmax KL. The manifest records `"temperature": "n/a"` rather than inventing one.
+
+### 17c. The matrix is 12 runs, not 24
+
+The requested matrix was 2 versions × 3 backbones × 2 LoRA × 2 KD = 24. Per §17a,
+**version and LoRA are the same axis**, so the 2×2 holds only two distinct
+configurations:
+
+| nest_version | lora_type | resulting model |
+|---|---|---|
+| v8 | v8 | **v8** |
+| v14 | asc | **v14** |
+| v8 | asc | identical weights to v14 — duplicate |
+| v14 | v8 | identical weights to v8 — duplicate |
+
+Submitting all four would spend ~190 GPU-hours per backbone re-deriving checkpoints
+that differ only in a metadata string. `run_matrix_hipster.sh` therefore varies
+`lora_type` and records `nest_version` alongside it: **3 backbones × 2 lora_type × 2 KD
+= 12**, plus the 2 MobileLLaMA external-teacher runs = **14**. `WITH_DUPLICATES=1`
+submits the redundant cells anyway as a null control — they should land within eval
+noise of their twins, which is a real if expensive measure of run-to-run variance, and
+this project currently has **no** seed replicate of anything.
+
+**Stage 1 is shared per backbone.** It trains a single `tok_level` (256) at a single
+rank (64), so the ladder ordering cannot apply; and with one level `students_all` is
+empty, so the prefix-KL term is structurally inert. Stage 1 is therefore identical
+across both `lora_type` and both KD settings — derived once per backbone and reused via
+`ELASTIC_PRETRAIN_TAG`, saving 9 × ~10h.
+
+**Cost: ~1200 GPU-pair-hours** (12 × ~85h Stage 2 + 3 × ~10h Stage 1). Stage backbones
+sequentially unless Hipster runs many concurrently.
+
+**Qwen variant:** the repo defines `qwen0.5b`, `qwen1.5b`, `qwen3b`. The matrix uses
+**`qwen0.5b`** — the launcher's own default *and* the first Qwen row of §15e's planned
+matrix — rather than silently substituting another size. Override with `QWEN_KEY=`.
+
+All four base models are present in the HF cache; no download is needed.
+
+### 17d. `--lora_type` and `--nest_version`
+
+One argument each, propagating the full stack, no duplicated LoRA implementation —
+both modes use the same `NestedLoRALinear`, differing only in the level→rank
+assignment.
+
+```
+--lora_type v8    ranks 8 16 32 64   rank ascends as budget DESCENDS (v4-v8 convention)
+--lora_type asc   ranks 64 32 16 8   rank ascends WITH budget       (v14 hypothesis)
+--nest_version v8 | v14              preset; sets lora_type unless given explicitly
+```
+
+Propagation: `run_matrix_hipster.sh` → `LORA_TYPE`/`NEST_VERSION`/`USE_KD` env →
+`finetune_elastic_slm.sh` → `train_elastic.py` (resolves to `lora_ranks`) →
+`ElasticConfig` → `elastic_config.json` in every checkpoint → eval, which rebuilds the
+config from that file. Both fields are **descriptive, not behavioural**: nothing
+branches on them, so a checkpoint loaded from disk behaves identically whether or not
+they are set. `--lora_ranks` still works and now *errors* if it contradicts
+`--lora_type`, so a checkpoint can never record a `lora_type` that does not describe
+its own weights.
+
+`--nest_version` is redundant with `--lora_type` **today**, and is kept deliberately:
+it is the stable name for "the whole recipe" if a future version changes something the
+rank ladder cannot express, and it makes the off-diagonal matrix cells expressible.
+
+Also added: **`run_manifest.json`**, written into `output_dir` at launch, recording
+`nest_version`, `lora_type`, backbone, KD block (including that the self-teacher shares
+weights), CORAL, decorrelation, vision-LoRA, resampler, optimizer, LR, scheduler,
+epochs, batch, seed, dataset, checkpoint, **git commit + branch + dirty flag**, SLURM
+job id and node. This exists because v8's provenance was recoverable only from its
+checkpoint — the launcher that produced it had since been edited.
+
+Validated by `jobs/test_lora_type_arg.sh` (27409, `ALL_TESTS_PASSED`): both mappings,
+both presets, preset-override for the off-diagonal cells, contradiction refusal,
+backward compatibility with no flags set, `asdict`/JSON round-trip, and that the fields
+do not change `lora_level_for_tok`. Anchor equivalence and the KD mechanism were
+audited in job 27408.
+
+
+## 18. KD teacher compatibility audit, and the Hipster V8xV14 matrix (decision 39)
+
+Status key used below: **AUDITED** (fact established by a job that ran) ·
+**PLANNED** (specified, not submitted) · RUNNING · COMPLETED · FAILED.
+
+### 18a. What the existing KD actually is — AUDITED
+
+Read off `losses.prefix_kl_loss`, `llava_elastic_mixin.py:325-345` and
+`engine.attach_kd_teacher`, not from names.
+
+| Property | Finding |
+|---|---|
+| KD type | **Logits KD only.** No hidden-state, attention, feature, or response-level KD exists in this repo |
+| loss | `KL(teacher‖student) = Σ_V softmax(t)·(log_softmax(t) − log_softmax(s))`, `F.kl_div(log_softmax(s/T), softmax(t/T))`, `×T²` |
+| temperature | **T = 1.0, hard-coded.** The signature takes `T` but the call site never passes it — there is no temperature knob |
+| KD weight | `prefix_kl_weight` (0.1), then `/ n_active` (=2 in sampled-student mode) |
+| distilled positions | positions where `labels != -100` — i.e. **assistant-response tokens only**; sequences right-aligned (`logits[:, L−n:]`) so differing visual-prefix lengths still line up |
+| teacher visual budget | **full/native.** `attach_kd_teacher` sets `teacher.config.matryoshka_vis_token_scale = None` → 576 tokens for a CLIP-L/336 teacher |
+| teacher image encoder / projector | teacher runs its *own* tower and projector (LLaVA-7B: CLIP-L/336 + `mlp2x_gelu`) — same family as our students, so both solve the same multimodal task |
+| tokenizer / vocab | **must match exactly.** `F.kl_div` reduces the vocab axis elementwise |
+| hidden dim | **irrelevant.** No loss consumes teacher hidden states. LLaVA-7B is 4096 vs TinyLlama 2048 and v12 ran fine |
+| output heads | only the vocab dimension matters, for the same reason |
+| CORAL | compares *projected visual tokens* and is **self-sourced even with an external teacher attached** (explicit in the code) — so it is not teacher supervision |
+| architecture assumption | **yes.** `attach_kd_teacher` hard-codes `LlavaLlamaForCausalLM.from_pretrained` — one loading path, LLaVA-Llama only |
+
+`teacher="self"` is a **separate mechanism sharing the flag**: the teacher is *this
+model* at `tok_levels[0]`, logits detached — teacher and student share weights exactly,
+measured KL ≈ 0.006. It is self-distillation across token budgets and **must not be
+reported as independent-teacher KD**.
+
+### 18b. KD Teacher Compatibility Audit — AUDITED
+
+Empirical inputs: job **27410** (tokenizers loaded and compared, not just sizes),
+job **27411** (real load attempts through the LLaVA path), job **27413** (registry
+tests). Machine-readable: `results/kd_compatibility_report.json`.
+
+Token-ID identity — the check that matters, since equal vocab size does not imply
+equal token IDs:
+
+| Student | vocab | vs LLaVA-7B (32000) | token IDs identical? |
+|---|---|---|---|
+| TinyLlama | 32000 | match | **yes** |
+| MobileLLaMA | 32000 | match | **yes** |
+| SmolLM2 | 49152 | mismatch | no |
+| Qwen2.5-0.5B | 151936 (head) / 151665 (tokenizer) | mismatch | no |
+
+| Student | 7B Teacher Compatible? | Family Teacher | Recommended Teacher | KD Mode | Reason |
+|---|---|---|---|---|---|
+| TinyLlama | **YES** (`DIRECT`) | — (LLaVA-7B *is* Llama-family) | `llava7b` | logits KD | token IDs byte-identical; same CLIP-L/336 + mlp2x_gelu interface; already used by v12 |
+| MobileLLaMA | **YES** (`DIRECT`) | MobileVLM_V2-1.7B — **unusable** | `llava7b` | logits KD | 32000-vocab Llama tokenizer, IDs identical to the teacher's. Family teacher fails to load (below) and is only 1.7B vs a 1.4B student anyway |
+| SmolLM2 | **NO** (`VOCAB_MAPPING_REQUIRED`) | SmolVLM-Instruct — **unusable** | **none** | self-distillation only | 49152 vs 32000. Family teacher blocked three independent ways |
+| Qwen2.5 | **NO** (`VOCAB_MAPPING_REQUIRED`) | **none in inventory** | **none** | self-distillation only | 151936 vs 32000; no Qwen VLM in the local cache |
+
+Why each family-matched teacher fails, all smoke-tested rather than assumed:
+
+- **MobileVLM_V2-1.7B** (`mtgv/MobileVLM_V2-1.7B`) — tokenizer is byte-identical to
+  MobileLLaMA's, vision tower is the same CLIP-L/336, so on paper it is the right
+  teacher. It **fails to load**: `ValueError: Unknown projector type: ldpnetv2`. Its
+  `mm_projector_type` is `ldpnetv2`, which this repo's projector builder does not
+  implement, and its `architectures` is `MobileLlamaForCausalLM` / `model_type:
+  mobilevlm`, not `LlavaLlamaForCausalLM`. Independently, its LLM is MobileLLaMA-1.7B
+  against a 1.4B student — a ~20% capacity gap, weak for a teacher.
+- **SmolVLM-Instruct** — blocked three ways: vocab **49155** vs the student's 49152
+  (3 added image tokens, so not even a family-internal match); architecture
+  `Idefics3ForConditionalGeneration`, which fails the LLaVA load path with a shape
+  error; and its **tokenizer does not load at all** in this environment
+  (`data did not match any variant of untagged enum ModelWrapper` — a `tokenizers`
+  version issue). Its tower is SigLIP-1152, not CLIP-L/336.
+- **Qwen** — no Qwen-family VLM is in the local HF cache. Qwen2-VL / Qwen2.5-VL exist
+  upstream and share the Qwen2 tokenizer, which would make them the correct candidates,
+  but nothing has been downloaded or verified, and this registry does not list
+  checkpoints it has not inspected. A further trap for any future Qwen KD:
+  Qwen2.5-0.5B's LM head is **151936** wide while its tokenizer holds **151665**
+  entries — a teacher must match the *head* width.
+
+**Is the 7B still useful cross-family?** For MobileLLaMA, yes and it is the
+recommendation — cross-family (Vicuna-7B vs MobileLLaMA) but the tokenizers are
+byte-identical, which is the only property the loss requires. For SmolLM2 and Qwen,
+**no**: making it work would need logit slicing/renormalisation or a learned vocabulary
+mapping. Neither exists here, and adding one would mean a claimed "KD improvement"
+could come from the alignment workaround rather than teacher supervision. Refused
+rather than approximated.
+
+### 18c. V8 vs V14 — AUDITED, and still no result
+
+Full component table in §17a. Summary: **v8 and v14 differ in exactly one component,
+the LoRA rank ladder** (`8 16 32 64` vs `64 32 16 8`). The anchor-config difference
+(fixed table vs `ratio 0.25`) is verified behaviourally identical at all four budgets
+(job 27408); the `acdfa79` code delta that landed mid-v8-run is verified inert
+(decorrelation-gated, False in both).
+
+> **Existing evidence remains insufficient for a controlled v8-v14 comparison.**
+
+v14 (job 27406) is ~33h into a ~85h Stage-2 run as of 2026-09-14. No checkpoint, no
+eval directory, no number on any metric. Nothing may be concluded in either direction.
+
+Files: both versions use the *same* classes — `NestedQueryResampler`
+(`resampler_arch="pool_anchored"`), `NestedLoRALinear`, `ElasticEngine`. There is no
+"v8 class" and no "v14 class"; the version is a rank-ordering choice, now expressed by
+`--lora_type` / `--nest_version`.
+
+### 18d. V8 vs V14 × Backbone × LoRA × KD — Hipster — PLANNED
+
+Nothing submitted. `bash run_matrix_hipster.sh` prints this; `SUBMIT=1` launches it.
+Seed is HF default **42** for every run (unset in the launchers). Every run: Stage 1
+shared per backbone, `pool_anchored` ratio-0.25, budgets 256/144/64/16, CLIP-L/336,
+1 epoch, LR 2e-5 cosine, warmup 0.03, bs 2 × accum 32 × 2 GPU, `mix665k`, `pad`
+aspect ratio, `eval_lmms_level.sh --array=0-3`.
+
+| ID | Version | Backbone | LoRA | KD | Teacher | Seed | Status | Job ID | Checkpoint | Result |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | v8 | SmolLM2 | v8 | on | self (shared weights) | 42 | PLANNED | — | `elastic-finetune-smollm2-m-v8lora-kdon` | — |
+| 2 | v8 | SmolLM2 | v8 | off | — | 42 | PLANNED | — | `…-smollm2-m-v8lora-kdoff` | — |
+| 3 | v14 | SmolLM2 | asc | on | self | 42 | PLANNED | — | `…-smollm2-m-asclora-kdon` | — |
+| 4 | v14 | SmolLM2 | asc | off | — | 42 | PLANNED | — | `…-smollm2-m-asclora-kdoff` | — |
+| 5 | v8 | MobileLLaMA | v8 | on | self | 42 | PLANNED | — | `…-mobilellama-m-v8lora-kdon` | — |
+| 6 | v8 | MobileLLaMA | v8 | off | — | 42 | PLANNED | — | `…-mobilellama-m-v8lora-kdoff` | — |
+| 7 | v14 | MobileLLaMA | asc | on | self | 42 | PLANNED | — | `…-mobilellama-m-asclora-kdon` | — |
+| 8 | v14 | MobileLLaMA | asc | off | — | 42 | PLANNED | — | `…-mobilellama-m-asclora-kdoff` | — |
+| 9 | v8 | Qwen2.5-0.5B | v8 | on | self | 42 | PLANNED | — | `…-qwen0.5b-m-v8lora-kdon` | — |
+| 10 | v8 | Qwen2.5-0.5B | v8 | off | — | 42 | PLANNED | — | `…-qwen0.5b-m-v8lora-kdoff` | — |
+| 11 | v14 | Qwen2.5-0.5B | asc | on | self | 42 | PLANNED | — | `…-qwen0.5b-m-asclora-kdon` | — |
+| 12 | v14 | Qwen2.5-0.5B | asc | off | — | 42 | PLANNED | — | `…-qwen0.5b-m-asclora-kdoff` | — |
+| 13 | v8 | MobileLLaMA | v8 | **on, external** | **llava7b** (`DIRECT`) | 42 | PLANNED | — | `…-mobilellama-m-v8lora-kd7b` | — |
+| 14 | v14 | MobileLLaMA | asc | **on, external** | **llava7b** (`DIRECT`) | 42 | PLANNED | — | `…-mobilellama-m-asclora-kd7b` | — |
+
+**The KD column in rows 1–12 is prefix-KL SELF-distillation** (teacher = the same
+weights at 256 tokens, KL ≈ 0.006). It is the only KD available on all three
+backbones. Rows 13–14 are the only genuine external-teacher KD the inventory permits.
+
+**Why 12 core and not 24** (§17c): version and LoRA are the same axis, so
+`v8+asc` ≡ v14 and `v14+v8lora` ≡ v8. `WITH_DUPLICATES=1` adds the redundant cells as
+a null control — worth running once, since nothing in this project has a seed
+replicate. Cost: ~1200 GPU-pair-hours.
+
+**Qwen variant:** `qwen0.5b` — the launcher default *and* §15e's first Qwen row.
+Override with `QWEN_KEY=qwen1.5b`.
+
+### 18e. Teacher-control experiments needed to make any KD claim — PLANNED
+
+Rows 13–14 give `KD off ↔ self-KD ↔ external-7B-KD` on MobileLLaMA (against rows 5–8),
+which is the only backbone where all three are technically valid. That is the
+teacher-control comparison. It cannot be run for SmolLM2 or Qwen, so **no
+cross-backbone claim about external-teacher KD is available from this matrix** — and
+none should be written. TinyLlama already has the same three-way contrast from v8/v11
+and v12 (§16l), where external KD lost on every metric at every budget.
+
+### 18f. Code changes — AUDITED/IMPLEMENTED
+
+| File | Change | Why |
+|---|---|---|
+| `llava/model/elastic/kd_teachers.py` | **new** — teacher registry + `check_pair` / `resolve_teacher` / `audit_all` | Teacher knowledge as data, not branches in the training loop. Every fact recorded came from a job that ran |
+| `llava/model/elastic/engine.py` | `attach_kd_teacher` resolves non-`llava` teachers through the registry; refuses rather than substitutes; writes `resolved_teacher_key` | Makes the audit's verdict enforceable at run time. `"llava"` kept as an alias so existing recipes/checkpoints are unaffected |
+| `llava/model/elastic/config.py` | `+nest_version, lora_type, kd_student_key, resolved_teacher_key` | Checkpoints self-identify; the *resolved* teacher is recorded, not the requested one |
+| `llava/train/train_elastic.py` | `+--lora_type, --nest_version, --kd_teacher, --kd_student_key, --kd_type`; rank resolution; `_write_run_manifest` | One argument per axis, propagating end-to-end; `run_manifest.json` records git commit + dirty flag |
+| `llava/model/elastic/nested_lora.py` | `max_rank = max(ranks)`, ascending assert relaxed | Prerequisite for `--lora_type asc` (§16m) |
+| `scripts/v1_5/finetune_elastic_slm.sh` | `+LORA_TYPE, NEST_VERSION, USE_KD, KD_TEACHER, KD_STUDENT_KEY, KD_TYPE` | Propagation |
+| `scripts/v1_5/pretrain_elastic_slm.sh` | `+NEST_VERSION` | Provenance on Stage 1 |
+| `run_matrix_hipster.sh` | **new** — matrix driver, dry-run by default | Reproducible generation with resolved teachers printed |
+| `jobs/audit_v8_v14.sh`, `audit_kd_teachers.sh`, `smoke_kd_teacher_load.sh`, `smoke_kd_forward.sh`, `test_kd_registry.sh`, `test_lora_type_arg.sh`, `test_lora_rank_order.sh` | **new** | The audits and validation behind every claim above |
+
+### 18g. CLI
+
+```
+--nest_version {v8,v14}          preset; sets --lora_type unless given explicitly
+--lora_type {v8,asc}             v8  = ranks 8 16 32 64 (rank ascends as budget descends)
+                                 asc = ranks 64 32 16 8 (rank ascends with budget)
+--use_kd BOOL                    prefix-KL on/off  (SELF-distillation unless a teacher is named)
+--kd_teacher KEY|auto            external teacher; 'auto' consults the registry, fails loudly
+--kd_student_key KEY             which backbone is the student (needed for resolution)
+--kd_type {auto,logits}          only 'logits' is implemented; no hidden/attention/response loss exists
+--teacher {self,llava}           legacy; 'llava' still forces the incumbent 7B
+```

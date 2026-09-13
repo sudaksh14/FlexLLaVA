@@ -156,6 +156,7 @@ echo "[FlexLLaVA] vision_lora_enable=${VISION_LORA_ENABLE:-False}  specialize_to
 deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --tok_levels ${STAGE1_TOK_LEVEL} \
     --lora_ranks ${STAGE1_LORA_RANK} \
+    ${NEST_VERSION:+--nest_version ${NEST_VERSION}} \
     --resampler_arch "${RESAMPLER_ARCH:-query}" \
     --anchor_routing "${ANCHOR_ROUTING:-}" \
     --anchor_mode "${ANCHOR_MODE:-ratio}" \
