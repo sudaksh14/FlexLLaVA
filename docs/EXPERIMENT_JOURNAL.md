@@ -48,6 +48,7 @@ Every decision below is the user's; the "result" column is what actually happene
 | 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
 | 24 | Cluster-wide reboot (all 8 nodes down) interrupted v7-kd7b mid-training and truncated v6-tokrange's eval to 4/8 levels. Cancel v7-kd7b and its eval outright; requeue the missing v6-tokrange levels with the script bug fixed; resize v9-parcel-decorr to fit on A10 (node208) instead of A40 (node205) so node205 stays free; write up the backbone/PARCEL/decorr ablation matrix that doesn't fit locally as a pending-work list for the other ("hipster") cluster. | Done (§15). Found and fixed a real bug in `eval_lmms_level.sh` along the way: `jq`'s availability is inconsistent across compute nodes, so 4 of 8 v6-tokrange eval array tasks silently fell back to a wrong 4-level default and errored out even though `elastic_config.json` was present and correct the whole time — replaced with a `python3`-based parse (env-guaranteed) and a loud failure instead of a silent wrong-grid fallback. v7-kd7b (27299) + its eval (27300) cancelled; v6-tokrange's missing levels (576/512/448/384-token) requeued as job 27375 `--array=4-7`. v9-parcel-decorr requeued as job 27376/27377 with `--gres=gpu:A10:2` (was A40:2) — justified by v8-parcel, the identical architecture minus the decorrelation term, having already completed its full 84.5h run cleanly on node208's A10:2. |
 | 25 | Analyse v6's available eval levels and v8 against the earlier runs and say whether any introduced change actually helped; record the outcome; make **v8 the best working model**; drop rank-nested vision LoRA from all future runs including v9; queue **v10** with vision LoRA fixed at 16 for both stages; re-scope the hipster matrix to the v8 setup with vision LoRA off, stating in that section that v8 is the best-performing config and that vision LoRA is off; rename v6's eval folders correctly and verify the pending evals land in the right ones. | Done (§16). **Yes, one change helped: PARCEL (v8) — the only run with a real budget–accuracy gradient, and the new best model (§16c).** The other two introduced changes lost: rank-nested vision LoRA is a regression on both backbones (§16d, default now False), and the extended 576→16 ladder is a large regression (§16b, retired). Found along the way that §15b's root cause was recorded backwards: *every* task of job 27292 hit the `jq` fallback, so v6's four surviving results were not 256/144/64/16 at all but 576/512/448/384 written under the wrong labels — verified against the measured prefill FLOPs and relabelled (§16a). v9 cancelled and re-scoped onto v8's grid with LoRA off; v10 added; v11 deferred by decision; recipes moved out of submitting-shell env vars into `submit_elastic_run.sh` (+ a `docs/SUBMITTED_RUNS.tsv` job-id→recipe log) in git, after v9's ladder had to be recovered from circumstantial evidence. v9 requeued as 27378/27379 and v10 as 27380/27381, both `--array=0-3`; all 8 nodes were still `down` at submit time, so neither has started. |
+| 34 | Analyze v9 and v10, update the journal, and say which is the best approach so far. | Done (§16k). **v8 is still the best model** -- it beats both v9 and v10 on MME/POPE/TextVQA/GQA at every level, and both lose most of v8's elasticity gradient (v9: 5%/19% of v8's TextVQA/GQA spread; v10: 8%/7%). The useful new result is v10 vs v8, a CLEAN single-flag isolation (decorr off in both): replacing v8's rank-nested-per-level vision LoRA with a shared rank-16 adapter loses almost all of v8's advantage, revising section 16d's framing -- under PARCEL specifically, full-capacity vision LoRA appears necessary, not harmful, contradicting the plain-query-resampler result the "vision LoRA hurts" scope limit was based on. SciQA remains the one consistent cost, now a 5-run pattern tracking LoRA capacity inversely. Both standing decorrelation triggers (section 16g, decision 33) did NOT fire -- v9 loses to v8 on 4/5 metrics -- so v13 stays with decorrelation off pending v11's clean read. |
 | 33 | If decorrelation is shown to help (per v9), add it to v13's recipe too. | Recorded as a standing decision (§16j), not yet actionable -- v9 (27382) is still training with no results. Flagged as its own item rather than folded silently into §16g's general "promote to default" trigger because v13 is a second already-running experiment (27393/27394, submitted with USE_TOKEN_DECORRELATION=False already baked into the job's captured environment) that is easy to forget when that trigger fires. Action recorded: check v9 against v8 AND v11 (the cleaner control for this specific flag), then either cancel+resubmit 27393/27394 or split off a v13b if 27393 has already started. |
 | 32 | Asked whether v11 could be made an 8-level ladder like v6, conditioned on it not adding training hours. | No — flagged rather than done silently. `kl_teacher_tok_level` defaults to index 0 (always the largest entry), and that level's forward runs every step regardless of ladder length, so moving v11 to v6's grid would grow the always-on teacher pass from 256 to 576 tokens (plus a costlier average sampled-student draw), adding real wall-clock the condition explicitly excluded. Asked the user how to proceed; chosen: leave v11 untouched as the exact-match control for v8/v9/v10, and run the question as its own experiment. **v13-parcel-longladder** added to `submit_elastic_run.sh` and queued (27393/27394) -- v11's flags on v6's 8-level grid and rank schedule, to test whether PARCEL fixes the long-ladder failure v6 showed on the plain query resampler (§16j). |
 | 31 | Analyze the v6 eval jobs for the remaining (256/144/64/16) token levels and compare against earlier evals. | Done (§16b/16i). All 8 levels now in. Confirms §16b's verdict with the complete ladder: the full 576-16 spread is barely larger than the top-4-only spread looked (TextVQA +0.79 over the whole 36x range), the short grid v6 shares with v4/v5/v8 is *less* elastic than v4's on that same range, TextVQA is non-monotone (16-tok scores above 144- and 64-tok), and v6@256 loses to v8@256 on every metric, worst on TextVQA (-13.75, roughly half of v8's score). Getting there required an unplanned detour (§16h): the §16a node restriction had put 27375 into an unreleasable SLURM hold (`ReqNodeList` requires ALL listed nodes, not any-of; regular users cannot release the resulting hold), and once resubmitted correctly with `--exclude`, an unexplained scheduler quirk kept later array tasks waiting on a busy node while an idle one sat unused, requiring the array to be split into separately-submitted pieces to actually land. |
@@ -1297,9 +1298,11 @@ levels, and v4 is the only vision-LoRA-off run in that comparison, so the SciQA
 regression tracks the LoRA flag rather than PARCEL. v9 (PARCEL, LoRA off, same grid)
 is the run that separates them.
 
-**Scope limit — do NOT write "vision LoRA always hurts" in the paper.** The evidence
-does not support a universal claim, and our own best model contradicts one. Every
-checkpoint audited 2026-09-09:
+**Scope limit — do NOT write "vision LoRA always hurts" in the paper. UPDATE
+2026-09-13 (§16k): this is no longer just "not proven either way" — v9/v10 now show
+the effect running the OPPOSITE direction under PARCEL. Read §16k before citing
+anything below as the final word.** The evidence does not support a universal claim,
+and our own best model contradicts one. Every checkpoint audited 2026-09-09:
 
 | run | resampler | vision LoRA | outcome |
 |---|---|---|---|
@@ -1591,6 +1594,105 @@ loses to v8@256 on every metric, worst on TextVQA (−13.75). No change to the �
 verdict — the 8-level ladder is retired — the complete data only sharpens it: the short
 grid v6 shares with v4/v5/v8 (256→16) is *less* elastic than v4's on the same range,
 not merely flat like the top four looked in isolation.
+
+
+### 16k. v9 and v10 results: v8 still wins, and the vision-LoRA story gets more specific
+
+Both landed clean (correct `tok_level` labels, no `jq`-fallback repeat). Full 256/144/64/16 comparison against v4/v5/v8:
+
+| level | run | MME-P | POPE-acc | POPE-F1 | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|---|---|
+| 256 | v4 | 1113.46 | 81.57 | 79.91 | 51.31 | 23.15 | 52.35 |
+| 256 | v5 | 1035.55 | 79.38 | 77.65 | 49.38 | 18.56 | 50.91 |
+| 256 | **v8** | **1170.25** | **84.33** | **83.06** | 48.14 | **28.47** | **56.07** |
+| 256 | v9 | 1120.79 | 80.40 | 78.64 | 50.72 | 19.58 | 51.88 |
+| 256 | v10 | 1138.75 | 80.97 | 79.49 | 50.52 | 19.96 | 51.95 |
+| 16 | v4 | 1116.40 | 80.70 | 78.26 | 44.12 | 19.90 | 51.18 |
+| 16 | v5 | 1040.23 | 78.89 | 76.80 | 49.73 | 17.74 | 50.35 |
+| 16 | **v8** | **1123.91** | **80.49** | **78.62** | 46.36 | **19.71** | **52.61** |
+| 16 | v9 | 1111.04 | 79.79 | 76.99 | 51.12 | 19.14 | 51.22 |
+| 16 | v10 | 1089.66 | 79.70 | 77.15 | 50.17 | 19.23 | 51.71 |
+
+(144/64-tok rows follow the same pattern; omitted for length.)
+
+**v8 is still the best model** — wins MME, POPE, TextVQA and GQA at every level against
+both v9 and v10. Neither new run beats it.
+
+**Elasticity (256−16 spread) also drops sharply for both:**
+
+| run | MME-P | POPE-acc | TextVQA | GQA |
+|---|---|---|---|---|
+| v4 | −2.94 | 0.87 | 3.25 | 1.17 |
+| v5 | −4.68 | 0.49 | 0.82 | 0.56 |
+| **v8** | **46.34** | **3.84** | **8.76** | **3.46** |
+| v9 | 9.75 | 0.61 | 0.44 | 0.66 |
+| v10 | 49.09 | 1.27 | 0.73 | 0.24 |
+
+v9 and v10 each recover only a fraction of v8's TextVQA/GQA gradient (v9: 5%/19% of
+v8's; v10: 8%/7%) — both essentially fall back toward v4/v5's flatness on the two
+metrics that actually reflect visual-detail usage, even though v10's MME spread is
+nominally larger than v8's (MME is the noisiest of these four and least trustworthy on
+its own for this comparison).
+
+**This forces a real revision to §16d's "vision LoRA is a regression" framing —
+specifically to the two vision-LoRA arms tested under PARCEL, not to v4-vs-v5.**
+
+The cleanest single comparison here is **v10 vs v8**: both have decorrelation off and
+PARCEL on; they differ in exactly one thing — v8's vision-tower adapter is rank-nested
+per level (ranks `8 16 32 64`, a dedicated adapter tied to each `tok_level`), v10's is a
+single **shared, non-specialized** rank-16 adapter used identically at every level. No
+decorrelation confound. And v10 loses almost all of v8's advantage: MME −31.5, POPE-acc
+−3.36, TextVQA −8.51, GQA −4.12 at 256 tokens, and its TextVQA/GQA elasticity collapses
+to near v4/v5 levels. **Under PARCEL, the FORM and CAPACITY of the vision-tower
+adapter — not just whether one exists — is doing real work.** A shared rank-16 adapter
+is close to not having one at all; a rank-nested adapter that scales up to 64 as the
+token budget shrinks is not.
+
+v9 is confounded (vision LoRA off **and** decorrelation on at once, relative to v8), so
+it cannot isolate either flag alone — but it lands in the same place as v10 (worse than
+v8 on MME/POPE/TextVQA/GQA, SciQA better), which is at least consistent with "no
+nested vision LoRA" being the larger driver of the loss, not decorrelation specifically.
+v9 also loses to **v4** — the plain-query, no-LoRA, no-decorrelation, no-PARCEL
+baseline — on POPE (−1.17), SciQA (−0.59), TextVQA (−3.57) and GQA (−0.47), winning
+only on MME (+7.33). That v9 doesn't clearly beat even v4 is itself informative: PARCEL
+alone, without a specialized vision adapter, is not obviously better than the original
+plain-query resampler on this evidence.
+
+**SciQA is the one metric that goes the other way, and it is now a five-run, very
+consistent pattern**, not a two-run coincidence: `v4 (51.31) > v9 (50.72) > v10 (50.52)
+> v5 (49.38) > v8 (48.14)` at 256 tokens — SciQA tracks *inversely* with how much
+vision-tower LoRA capacity a run has, across both resamplers and independent of
+decorrelation. This looks like a real, specific cost of adapting the vision tower
+(plausibly diagram/layout-sensitive spatial features that SciQA's images lean on more
+than the other four benchmarks), not a fluke — SciQA's own stderr is ~1.11pp
+(vs. GQA's ~0.44pp), and the run-to-run gaps here are 0.2–3.2pp, mostly outside it.
+
+**Net read: PARCEL's benefit and rank-nested vision LoRA's benefit are not
+independent — under this architecture they appear to need each other.** v5 (LoRA,
+no PARCEL) loses to v4. v9/v10 (PARCEL, weak-or-no LoRA) lose most of what v8 (PARCEL +
+full nested LoRA) has. Only the combination — PARCEL *and* full rank-nested,
+per-level-specialized vision LoRA — has produced both the accuracy gain and the
+elasticity gradient. That combination also reliably costs SciQA. Caveat unchanged from
+§16d: one seed, one backbone (TinyLlama) so far; v10's isolation is clean, v9's is not.
+
+**Consequence for the standing decisions:**
+
+- **§16g (promote decorrelation to default if v9 beats v8): trigger NOT met.** v9 loses
+  to v8 on 4 of 5 core metrics. Decorrelation is not promoted.
+- **Decision 33 (add decorrelation to v13 if shown to help): trigger NOT met, and not
+  fully testable yet.** v9 does not beat v8, so the first leg already fails; the second
+  leg (v9 vs v11, the clean isolation) still awaits v11, which has not reported. **Do
+  not** flip `USE_TOKEN_DECORRELATION` in v13's recipe on current evidence — if
+  anything it leans negative, though confounded. Revisit once v11 lands.
+- **§16d's scope limit needs a footnote, not a reversal.** The claim there — rank-nested
+  vision LoRA lost on **v4-vs-v5, the plain `query` resampler** — still stands exactly
+  as measured. What's new is the *other* side of the question §16d flagged as open
+  ("under PARCEL, vision-LoRA-off has never been run"): it has now been run (v9, v10),
+  and under PARCEL the direction flips — full nested vision LoRA helps, weakening or
+  removing it hurts. **"Vision LoRA hurts" was never safe to write generally (§16d
+  already said so); it is now actively wrong as a blanket statement — the honest claim
+  is resampler-architecture-dependent and adapter-capacity-dependent, with SciQA as a
+  consistent specific cost either way.**
 
 ### 16j. v13-parcel-longladder: does PARCEL fix v6's long-ladder failure?
 

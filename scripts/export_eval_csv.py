@@ -36,6 +36,17 @@ MODELS = {
     "elastic-finetune-tinyllama-v6-tokrange": ("FlexTinyLLaVA-1.1B (v6, 576-16 ladder)", "TinyLlama-1.1B-Chat-v1.0", "elastic (nested resampler)"),
     # v8 = PARCEL pool-anchored resampler. Current best elastic model.
     "elastic-finetune-tinyllama-v8-parcel": ("FlexTinyLLaVA-1.1B (v8-parcel, BEST)", "TinyLlama-1.1B-Chat-v1.0", "elastic (PARCEL pool-anchored)"),
+    # v9 = PARCEL + decorrelation, vision LoRA OFF entirely. Loses to v8 on
+    # 4/5 core metrics -- decorrelation does not clear the bar to become
+    # default (section 16k), though confounded with the LoRA removal; v11
+    # (PARCEL, decorr off, LoRA off) is the clean read once it reports.
+    "elastic-finetune-tinyllama-v9-parcel-decorr": ("FlexTinyLLaVA-1.1B (v9, PARCEL+decorr, no LoRA)", "TinyLlama-1.1B-Chat-v1.0", "elastic (PARCEL pool-anchored)"),
+    # v10 = PARCEL + a single SHARED rank-16 vision LoRA (not rank-nested),
+    # decorrelation off. Clean, unconfounded isolation of LoRA FORM against
+    # v8: also loses most of v8's elasticity/accuracy, with no decorr
+    # confound -- evidence that v8's full nested-per-level LoRA (not just
+    # "any vision LoRA") is doing real work under PARCEL (section 16k).
+    "elastic-finetune-tinyllama-v10-parcel-lora16": ("FlexTinyLLaVA-1.1B (v10, PARCEL+shared-r16-LoRA)", "TinyLlama-1.1B-Chat-v1.0", "elastic (PARCEL pool-anchored)"),
 }
 SUPERSEDED = ["llava-elastic-finetune", "llava-elastic-finetune-v3",
               "elastic-finetune-tinyllama", "elastic-finetune-tinyllama-v3",
