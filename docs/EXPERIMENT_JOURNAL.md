@@ -48,6 +48,7 @@ Every decision below is the user's; the "result" column is what actually happene
 | 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
 | 24 | Cluster-wide reboot (all 8 nodes down) interrupted v7-kd7b mid-training and truncated v6-tokrange's eval to 4/8 levels. Cancel v7-kd7b and its eval outright; requeue the missing v6-tokrange levels with the script bug fixed; resize v9-parcel-decorr to fit on A10 (node208) instead of A40 (node205) so node205 stays free; write up the backbone/PARCEL/decorr ablation matrix that doesn't fit locally as a pending-work list for the other ("hipster") cluster. | Done (§15). Found and fixed a real bug in `eval_lmms_level.sh` along the way: `jq`'s availability is inconsistent across compute nodes, so 4 of 8 v6-tokrange eval array tasks silently fell back to a wrong 4-level default and errored out even though `elastic_config.json` was present and correct the whole time — replaced with a `python3`-based parse (env-guaranteed) and a loud failure instead of a silent wrong-grid fallback. v7-kd7b (27299) + its eval (27300) cancelled; v6-tokrange's missing levels (576/512/448/384-token) requeued as job 27375 `--array=4-7`. v9-parcel-decorr requeued as job 27376/27377 with `--gres=gpu:A10:2` (was A40:2) — justified by v8-parcel, the identical architecture minus the decorrelation term, having already completed its full 84.5h run cleanly on node208's A10:2. |
 | 25 | Analyse v6's available eval levels and v8 against the earlier runs and say whether any introduced change actually helped; record the outcome; make **v8 the best working model**; drop rank-nested vision LoRA from all future runs including v9; queue **v10** with vision LoRA fixed at 16 for both stages; re-scope the hipster matrix to the v8 setup with vision LoRA off, stating in that section that v8 is the best-performing config and that vision LoRA is off; rename v6's eval folders correctly and verify the pending evals land in the right ones. | Done (§16). **Yes, one change helped: PARCEL (v8) — the only run with a real budget–accuracy gradient, and the new best model (§16c).** The other two introduced changes lost: rank-nested vision LoRA is a regression on both backbones (§16d, default now False), and the extended 576→16 ladder is a large regression (§16b, retired). Found along the way that §15b's root cause was recorded backwards: *every* task of job 27292 hit the `jq` fallback, so v6's four surviving results were not 256/144/64/16 at all but 576/512/448/384 written under the wrong labels — verified against the measured prefill FLOPs and relabelled (§16a). v9 cancelled and re-scoped onto v8's grid with LoRA off; v10 added; v11 deferred by decision; recipes moved out of submitting-shell env vars into `submit_elastic_run.sh` (+ a `docs/SUBMITTED_RUNS.tsv` job-id→recipe log) in git, after v9's ladder had to be recovered from circumstantial evidence. v9 requeued as 27378/27379 and v10 as 27380/27381, both `--array=0-3`; all 8 nodes were still `down` at submit time, so neither has started. |
+| 37 | Research only: would a fixed rank-64 shared adapter help, given shared r16 (v10) did not? Can more rank help? | No, predicted from existing data (§16n), not queued. At 256 tok v8's *rank-8* nested level beats v10's *rank-16* shared adapter by 8.5 TextVQA — the smaller adapter wins, so capacity is not the shortfall. At 16 tok shared r16 already captures 94% of nested r64's TextVQA gain — nothing left for rank to buy. What separates them is the nested prefix's **quarantine**: the 256-token forward reads and trains only columns 1–8, so the 16-token level's aggressive adaptation is confined to columns 9–64 the teacher never sees; a budget-blind shared adapter has no partition, and more rank gives the student objective more room to reshape the columns the teacher must read through. Prediction: shared r64 regresses the top end further. Offered as a hipster row if the paper wants "rank is not the variable" shown rather than argued; the run that actually tests top-level capacity is v14. |
 | 36 | Add a journal section isolating the vision-LoRA axis (none → fixed r16 → nested); set up v14 = v8's nested LoRA with the rank ladder reversed so rank follows token budget; cancel the running local v11. | Done (§16m). The three-arm table (v11 / v10 / v8, all PARCEL + decorr off) shows the adapter effect is **non-monotone in capacity** — a shared r16 adapter is worse than none at 256 tok (TextVQA 19.96 vs 22.18) while lifting the 16-tok floor by +7; nesting lifts both ends. SciQA is paid by nesting specifically (48.14 vs 50.2–50.5 for the other two). **v14-parcel-asclora** = v8 with `LORA_RANKS 64 32 16 8`, everything else identical; queued as **27406/27407** on node205. Required a code change — `NestedLoRALinear` asserted ascending ranks and took `max_rank = ranks[-1]`, neither structural; now `max(ranks)`, and the shared-adapter index in `ElasticConfig` picks the max entry rather than the last. Validated by `jobs/test_lora_rank_order.sh` (27405, `ALL_TESTS_PASSED`) incl. the `[64]`→`[64,32,16,8]` warm start, where the teacher level now uses all 64 columns (v8 used 8 — an inherent second difference, noted in §16m). Renamed last turn's `v14-final-parcel` sweep recipe to `final-parcel` to free the v14 name. Local v11 (27386) + eval (27387) cancelled at ~1d19h; its partial checkpoints left on disk; hipster v11 remains the reference. |
 | 35 | With hipster v11/v12 in (`results/hipster_eval_summary.csv`): analyze all runs; name the final best config across vision LoRA / decorr / CORAL / KD / PARCEL fixed-vs-ratio; pick the recipe for every other SLM backbone; say whether a 576-token teacher or the full ladder helps; write the best config at the end of the journal explicitly. | Done (§16l + the "FINAL BEST CONFIG" block ending §16). **Final recipe = v8, verbatim** — PARCEL ratio-0.25, rank-nested vision LoRA `8 16 32 64`, decorr off, CORAL off, self-teacher, 4-level grid — now `final-parcel` in `submit_elastic_run.sh`, `SLM_KEY`-parametrised. Every axis has a clean single-flag isolation against hipster v11: PARCEL creates the gradient (v11 vs v4), nested LoRA lifts the whole curve (+6.3 TextVQA / +2.1 GQA @256, v8 vs v11), a shared r16 adapter is *worse* than none at 256 (v10 vs v11), decorrelation is negative (v9 vs v11, §16g and decision 33 closed), the 7B KD teacher is negative everywhere (v12 vs v11, TextVQA −6.4). CORAL was never on in any run; fixed vs ratio anchors are identical at 0.25 on this grid — neither is an evidenced choice. v8 wins 4/5 metrics at all four budgets; SciQA −2..−3 is the constant cost, monotone in adapter capacity across six runs. Flagged that "elasticity" as a spread rewards a bad floor — v11's larger spread comes from collapsing at 16 tok — so the paper must report the frontier. 576-teacher / full ladder: no data (v13 12h in); prior evidence negative (v6 flat; self-KL ~0 means teacher "strength" is not the lever; the one real-signal teacher, v12, hurt). §16f's v11-based hipster plan superseded: SmolLM2 v11 cost TextVQA −9.6 vs its v4. Sweep must re-run tinyllama under the final tag as the seed replicate. |
 | 34 | Analyze v9 and v10, update the journal, and say which is the best approach so far. | Done (§16k). **v8 is still the best model** -- it beats both v9 and v10 on MME/POPE/TextVQA/GQA at every level, and both lose most of v8's elasticity gradient (v9: 5%/19% of v8's TextVQA/GQA spread; v10: 8%/7%). The useful new result is v10 vs v8, a CLEAN single-flag isolation (decorr off in both): replacing v8's rank-nested-per-level vision LoRA with a shared rank-16 adapter loses almost all of v8's advantage, revising section 16d's framing -- under PARCEL specifically, full-capacity vision LoRA appears necessary, not harmful, contradicting the plain-query-resampler result the "vision LoRA hurts" scope limit was based on. SciQA remains the one consistent cost, now a 5-run pattern tracking LoRA capacity inversely. Both standing decorrelation triggers (section 16g, decision 33) did NOT fire -- v9 loses to v8 on 4/5 metrics -- so v13 stays with decorrelation off pending v11's clean read. |
@@ -1991,3 +1992,69 @@ whether the 16-token level — now on a rank-8 adapter instead of rank-64 — ho
 hipster twin already exists and is the one used throughout §16l; the only thing lost is
 the cross-cluster replicate. Its partial checkpoint directories
 (`elastic-*-tinyllama-v11-parcel-nolora`) are left on disk, not deleted.
+
+
+### 16n. Would a shared rank-64 adapter help? Prediction: no — rank is not the variable (research only, decision 37)
+
+The question, given v10 (shared r16) did not help: is r16 simply too small, and would a
+shared r64 close the gap to v8? Three numbers from §16m answer it without a run.
+
+**1. At the top budget, the winner has *less* capacity than the loser.** At 256 tokens
+v8's level uses a **rank-8** adapter and gains +6.29 TextVQA / +2.12 GQA / +0.81 POPE
+over no adapter. v10's **rank-16** shared adapter at the same level *loses* −2.22 /
+−2.00 / −2.55. An 8.5-point TextVQA gap in favour of the smaller adapter cannot be a
+capacity shortfall. Something other than rank separates them.
+
+**2. At the bottom budget, r16 already captures nearly all of the nested-r64 gain.**
+At 16 tokens over no adapter: shared r16 gives +7.14 TextVQA, nested r64 gives +7.62 —
+94% of the gain at a quarter of the rank. GQA +1.42 vs +2.32, MME +103 vs +137. The
+16-token level does not need 64 columns; what it needs, it gets from 16. Raising the
+shared rank has almost nothing left to buy here.
+
+**3. So what separates v8 from v10 is where the gradients land, not how many there
+are.** With `lora_specialize_tok=False` the vision tower is budget-blind: one ΔW is
+applied whether the resampler downstream will keep 256 tokens or 16. Every training
+step that adapter receives gradient from the 256-token teacher pass *and* from one
+sampled student pass (144/64/16, mean ≈75 tokens — §16j). The student levels are the
+starved ones with the higher CE, so they push harder, and they push toward CLIP
+features that survive aggressive compression — global, summary-like. The teacher level
+wants the opposite: fine detail preserved for 256 queries. A single function of the
+input has to pick one; it drifts toward the students, which is exactly the v10
+signature — floor up, top down.
+
+The nested design does not avoid shared parameters — v8's rank-8 prefix is a
+sub-block of its rank-64 adapter and receives gradient from *every* level. What it does
+is **quarantine**: the forward at level 0 slices `A[:, :8] @ B[:8]`, so autograd from
+the 256-token pass never touches columns 9–64, and the 256-token forward never *reads*
+them. The 16-token level's aggressive adaptation lives in 56 columns the teacher
+neither trains nor uses. The 8 columns they do share settle on a compromise, but with
+only 8 of them and the teacher present every step, that compromise stays close to
+CLIP. A shared adapter of any rank has no such partition — and giving it *more* rank
+gives the student objective more room to reshape the columns the teacher is forced to
+read through. The prediction is therefore not "r64 recovers the top end" but "r64
+regresses it further, while the 16-token level gains ≤ the ~6% r16 left on the table."
+
+**Literature, from memory — verify before citing.** This is the standard multi-task
+LoRA interference result: one low-rank adapter across conflicting objectives
+underperforms per-objective adapters, which is what motivates the MoE-style LoRA
+family (MixLoRA / MoLoRA / LoRAHub-type routing) — routing exists precisely because
+rank does not resolve conflict. Directionally against high shared rank: Biderman et al.
+2024 ("LoRA Learns Less and Forgets Less") find higher-rank LoRA behaves more like full
+fine-tuning, i.e. forgets more of the pretrained features — and CLIP's pretrained
+features are exactly what the 256-token level needs kept intact. The LoRA rank sweeps
+the journal already leans on (§11: saturation by r≈8–16, LangVision-LoRA-NAS's r=16
+sweet spot) point the same way: adapter capacity is rarely the bottleneck. The nested
+structure itself is DyLoRA's (Valipour et al. 2023) training scheme — prefix-nested
+ranks so any prefix is a valid adapter — which is why lower prefixes stay competitive
+and why the 8-column teacher slice works at all.
+
+**Not queued, and why.** A shared-r64 run is a single recipe line, but both 2-GPU nodes
+are taken (v13, v14) and the prediction is a loss on the top budget with no upside at
+the bottom. If the paper wants the row anyway — "rank is not the variable" is a clean
+ablation to *show*, not just argue — it is a hipster candidate at zero design cost:
+`VISION_LORA_SPECIALIZE_TOK=False LORA_RANKS="64 64 64 64" STAGE1_LORA_RANK=64` on the
+`final-parcel` base. The run that *does* test whether the 256 level wants more capacity
+is v14 (256→r64, nested, quarantine intact), already running. The cheaper ablation
+worth more than shared-r64, if a slot opens: nested with a **smaller** max
+(`4 8 12 16`) — keeps the partition, cuts adapter parameters 4×, and point 2 predicts
+it loses little; that is an efficiency-story row, not a capacity one.
