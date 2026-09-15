@@ -47,6 +47,12 @@ MODELS = {
     # confound -- evidence that v8's full nested-per-level LoRA (not just
     # "any vision LoRA") is doing real work under PARCEL (section 16k).
     "elastic-finetune-tinyllama-v10-parcel-lora16": ("FlexTinyLLaVA-1.1B (v10, PARCEL+shared-r16-LoRA)", "TinyLlama-1.1B-Chat-v1.0", "elastic (PARCEL pool-anchored)"),
+    # v11 = PARCEL, no vision LoRA, no decorr, self-teacher. Minimal PARCEL run;
+    # the control every other v9-v14 arm isolates against. Evaluated on hipster.
+    "elastic-finetune-tinyllama-v11-parcel-nolora": ("FlexTinyLLaVA-1.1B (v11, PARCEL, no LoRA)", "TinyLlama-1.1B-Chat-v1.0", "elastic (PARCEL pool-anchored)"),
+    # v13 = v11's recipe (no LoRA) on v6's 8-level 576-16 ladder. Rescues most
+    # of v6's failure but still trails v8 -- section 16p.
+    "elastic-finetune-tinyllama-v13-parcel-longladder": ("FlexTinyLLaVA-1.1B (v13, PARCEL long-ladder, no LoRA)", "TinyLlama-1.1B-Chat-v1.0", "elastic (PARCEL pool-anchored)"),
 }
 SUPERSEDED = ["llava-elastic-finetune", "llava-elastic-finetune-v3",
               "elastic-finetune-tinyllama", "elastic-finetune-tinyllama-v3",

@@ -48,6 +48,7 @@ Every decision below is the user's; the "result" column is what actually happene
 | 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
 | 24 | Cluster-wide reboot (all 8 nodes down) interrupted v7-kd7b mid-training and truncated v6-tokrange's eval to 4/8 levels. Cancel v7-kd7b and its eval outright; requeue the missing v6-tokrange levels with the script bug fixed; resize v9-parcel-decorr to fit on A10 (node208) instead of A40 (node205) so node205 stays free; write up the backbone/PARCEL/decorr ablation matrix that doesn't fit locally as a pending-work list for the other ("hipster") cluster. | Done (§15). Found and fixed a real bug in `eval_lmms_level.sh` along the way: `jq`'s availability is inconsistent across compute nodes, so 4 of 8 v6-tokrange eval array tasks silently fell back to a wrong 4-level default and errored out even though `elastic_config.json` was present and correct the whole time — replaced with a `python3`-based parse (env-guaranteed) and a loud failure instead of a silent wrong-grid fallback. v7-kd7b (27299) + its eval (27300) cancelled; v6-tokrange's missing levels (576/512/448/384-token) requeued as job 27375 `--array=4-7`. v9-parcel-decorr requeued as job 27376/27377 with `--gres=gpu:A10:2` (was A40:2) — justified by v8-parcel, the identical architecture minus the decorrelation term, having already completed its full 84.5h run cleanly on node208's A10:2. |
 | 25 | Analyse v6's available eval levels and v8 against the earlier runs and say whether any introduced change actually helped; record the outcome; make **v8 the best working model**; drop rank-nested vision LoRA from all future runs including v9; queue **v10** with vision LoRA fixed at 16 for both stages; re-scope the hipster matrix to the v8 setup with vision LoRA off, stating in that section that v8 is the best-performing config and that vision LoRA is off; rename v6's eval folders correctly and verify the pending evals land in the right ones. | Done (§16). **Yes, one change helped: PARCEL (v8) — the only run with a real budget–accuracy gradient, and the new best model (§16c).** The other two introduced changes lost: rank-nested vision LoRA is a regression on both backbones (§16d, default now False), and the extended 576→16 ladder is a large regression (§16b, retired). Found along the way that §15b's root cause was recorded backwards: *every* task of job 27292 hit the `jq` fallback, so v6's four surviving results were not 256/144/64/16 at all but 576/512/448/384 written under the wrong labels — verified against the measured prefill FLOPs and relabelled (§16a). v9 cancelled and re-scoped onto v8's grid with LoRA off; v10 added; v11 deferred by decision; recipes moved out of submitting-shell env vars into `submit_elastic_run.sh` (+ a `docs/SUBMITTED_RUNS.tsv` job-id→recipe log) in git, after v9's ladder had to be recovered from circumstantial evidence. v9 requeued as 27378/27379 and v10 as 27380/27381, both `--array=0-3`; all 8 nodes were still `down` at submit time, so neither has started. |
+| 43 | Analyze the completed v13 run: did the long ladder and self-KD from 576 tokens help; what was the config; v8/v11/v14 style? | Done (§16p). **Config is v11-style** (`use_lora=false`, PARCEL, decorr off, self-teacher) placed on v6's 8-level ladder — not v8's or v14's nested-LoRA recipes. **"KD from 576" is self-distillation** (`teacher: "self"`), not external KD (contrast v12); it changes which level is the self-teacher because `kl_teacher_tok_level` is always index 0, which is now 576 instead of 256. **Does the long ladder help? Yes, decisively vs. v6** — every metric, every level, TextVQA +6 to +8 pts, MME +57 to +139 pts — confirming PARCEL rescues most of v6's catastrophic failure, and doing so DESPITE carrying a known LoRA-off handicap (§16m) that runs against v13, so the true PARCEL effect is likely understated here. **Does it beat v8? No** — loses MME/POPE/GQA at every shared level, wins only SciQA (the familiar LoRA-off pattern) and ties TextVQA at 16 tok. v13's own elasticity (both full 576-16 and the short 256-16 sub-range) is flatter than v8's or hipster v11's. At v13@576 — literally the same token count as the dense baseline — it still trails baseline by ~18 TextVQA / 6 GQA points, nearly identical to v13@256, so the extra 320 top-ladder tokens buy almost nothing: a milder recurrence of the token-budget-has-no-effect pattern. Verdict unchanged: `final-parcel` (v8) remains the recipe; the long ladder stays a research question, not a replacement. |
 | 42 | Move the W&B API key out of the tracked scripts into `~/.netrc` or a non-committed env file, on `main`, and push. | Done (§20). The key was inline in **10** tracked `run_job*.sh` files as `#SBATCH --export=ALL,WANDB_API_KEY=…`, so it sat in the repo, in history, and on GitHub. Moved to `~/.netrc` (mode 600, `machine api.wandb.ai`) — wandb's native mechanism, needing no script logic since `$HOME` is shared with the compute nodes; every export line became a plain `--export=ALL`. Verified netrc resolves and that later `#SBATCH` directives (e.g. `--exclusive`) still apply, since SLURM scans through comments. `.gitignore` now blocks `.env`/`*.env`/`.netrc`/`secrets.sh`. **Flagged as NOT fixed by this change: the key remains in git history, on GitHub, and on the `hipster` branch — it must be rotated at wandb.ai, which is the only step that ends the exposure.** |
 | 41 | (Continuation) Validate both baselines with real training steps before committing multi-day jobs. | Done (§19e–g). **M3 passed both stages** (20 real steps each, 27418). **MQT was silently running OUR model**: FlexLLaVA's editable install registers a MetaPathFinder for `llava`, and `cd MQT-LLaVA` does not beat it because `sys.path[0]` is the *script's* dir, not the cwd — so MQT's train.py drove our model and crashed on a missing `query_abstractor`. The crash was luck; a different flag set could have trained to completion and produced numbers labelled "MQT" that were not MQT. Fixed with `PYTHONPATH` plus a guard that resolves `llava.__file__` and refuses to run otherwise. Also removed the `mm_projector` flags — MQT has no projector at all (diag 27419). After the fix MQT Stage 1 passes (27421) and forward+backward at 4 tokens is verified under transformers 4.44.2 (27424: loss 3.92 finite, grads reach the query bank). MQT Stage 2 OOM'd on **one** A10 during optimizer-state init, before step 1 — an artifact of smoking on a single GPU because both 2-GPU nodes were busy; our own Stage 2 needs 2 GPUs for the same reason. Retracted my earlier "MQT imports cleanly so the version risk didn't materialise": that import was resolving our package. |
 | 40 | Baseline runs for M3 and MQT at 4 tokens on TinyLlama, using THEIR train loops, our vision encoder/backbone/data/hyperparams; minimal and quick. | Done, PLANNED not submitted (§19). **M3 needed no new code** -- this repo is an M3 fork with the pure-M3 branch intact, so `MATRYOSHKA_SCALE=4` runs M3's own loop (12x12 avg-pool -> exactly 4 tokens, verified job 27415). **MQT initially appeared to run from its vendored tree** — that was WRONG, see decision 41: our editable install shadowed it and MQT's train.py was driving OUR model. Each method keeps its OWN Stage-1 convention (M3: plain 576-token projector; MQT: `first_stage`=256 queries) because that is part of the pipeline being baselined. Flagged two scope limits: a fixed 4-token budget narrows both methods (M3 normally trains a scale list, MQT normally samples a random count), so these are not M3/MQT headline numbers; and eval is NOT wired -- `eval_lmms_level.sh` requires `elastic_config.json` which these checkpoints lack. Also noticed the env is now transformers 4.44.2, not the 4.36.2 recorded in memory. |
@@ -1770,6 +1771,116 @@ see a later change to the recipe file):
    training under the old flag, decide whether to let it finish as the "no decorr" data
    point and launch the decorr-on version as a new tag (e.g. `v13b`) instead of
    interrupting a multi-day run partway through.
+
+*(Moot by the time v13 finished: §16k/§16g/decision 33 already closed the decorrelation
+trigger negative — v9 lost to v8 on 4/5 metrics — so v13 correctly stayed with
+`USE_TOKEN_DECORRELATION=False` the whole way through, no action needed.)*
+
+### 16p. v13 results: PARCEL rescues most of the long-ladder failure, but does not beat v8
+
+Completed (jobs 27393/27394). Config confirmed from `elastic_config.json`:
+`resampler_arch=pool_anchored`, `anchor_mode=ratio` @0.25, **`use_lora=false`**,
+`use_token_decorrelation=false`, `teacher=self`, ladder `576 512 448 384 256 144 64 16`,
+`lora_ranks [2,4,6,8,8,16,32,64]` (inert — no adapter is injected while `use_lora` is
+false, but `train_elastic.py` still requires the length to match `tok_levels`).
+
+**Config identity: v11-style, not v8 or v14.** `use_lora=false` is v11's flag exactly
+(v8 and v14 both have `use_lora=true`, differing only in which direction the ranks run).
+v13 is v11's recipe — PARCEL, no vision LoRA, no decorrelation, self-teacher — placed on
+v6's 8-level ladder instead of the short 4-level grid. Not a new design.
+
+**"KD from 576 tokens" is self-distillation, not external KD.** `teacher: "self"` —
+`teacher_model_path` is populated in the JSON but inert while `teacher` is `"self"`; no
+external checkpoint is loaded (contrast v12, which sets `teacher: "llava"`). What "576
+tokens" changes is which level plays teacher: `kl_teacher_tok_level` is always index 0,
+and on this 8-level ladder index 0 is 576, not the 256 every short-grid run (v4/v5/v8/
+v9/v10/v11/v14) uses. So every step's self-distillation target is the model's own
+576-token forward — the mechanism §16j flagged as costing real compute (teacher pass at
+~2x the FLOPs of a 256-token teacher) is confirmed to be exactly what ran.
+
+**Full ladder:**
+
+| level | MME-P | POPE-acc | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|
+| 576 | 1099.94 | 81.61 | 50.57 | 22.77 | 51.96 |
+| 512 | 1103.82 | 81.29 | 50.82 | 22.54 | 51.91 |
+| 448 | 1094.60 | 81.56 | 50.67 | 22.67 | 52.00 |
+| 384 | 1107.26 | 81.57 | 50.72 | 22.47 | 52.06 |
+| 256 | 1138.03 | 81.19 | 50.57 | 22.06 | 52.11 |
+| 144 | 1103.66 | 80.47 | 50.82 | 22.07 | 51.87 |
+| 64  | 1131.21 | 80.30 | 50.92 | 21.97 | 51.64 |
+| 16  | 1123.55 | 79.87 | 50.47 | 20.07 | 51.39 |
+
+**Does the long ladder help? Yes, dramatically, relative to v6 — this is the headline
+result.** v13 vs v6 (v6 is `resampler_arch=query` on the identical 8-level grid and
+rank schedule — the only prior data point on this ladder), every level, every metric:
+
+| level | MME-P | POPE-acc | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|
+| 576 | +57.2 | +1.15 | +3.07 | +7.96 | +1.30 |
+| 512 | +60.3 | +1.51 | +3.47 | +8.03 | +1.58 |
+| 448 | +59.4 | +1.58 | +3.57 | +8.32 | +1.71 |
+| 384 | +69.0 | +1.48 | +3.62 | +7.84 | +1.84 |
+| 256 | +114.9 | +1.25 | +3.17 | +7.34 | +1.84 |
+| 144 | +102.3 | +1.04 | +9.12 | +8.16 | +2.23 |
+| 64 | +139.3 | +1.24 | +9.72 | +8.17 | +2.00 |
+| 16 | +118.3 | +0.48 | +8.08 | +6.05 | +1.84 |
+
+Every cell is a win, most by a wide margin — TextVQA +6 to +8 points at every budget,
+MME +57 to +139. **This comparison is confounded (v6 has vision LoRA on, v13 has it
+off) and the confound runs the WRONG way for v13**: §16m/§16l already established that
+under PARCEL, vision-LoRA-off costs several points against LoRA-on (v8 vs v11: −6.3
+TextVQA, −2.1 GQA at 256 tok). v13 is carrying that handicap and still wins by 6-9
+TextVQA points. The honest reading is that PARCEL's fix for the long-ladder failure is
+if anything *understated* by this table — a `use_lora=true` version of v13 would likely
+win by even more, though that is not a measured claim.
+
+**v13's own elasticity, extended vs. short range:**
+
+| range | MME-P | POPE-acc | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|
+| full 576→16 | −23.6 | +1.74 | +0.10 | +2.70 | +0.57 |
+| short 256→16 (v8/v11's range) | +14.5 | +1.32 | +0.10 | +1.99 | +0.72 |
+
+Both are far short of v8's short-range spread (MME +46.3, TextVQA +8.76, GQA +3.46,
+§16c) and even short of hipster v11's (MME +99.95, TextVQA +10.09, GQA +3.66) — v13 is
+flatter than either short-grid PARCEL run on the range they share. So while PARCEL
+fixed v6's *catastrophic* failure, it did not reproduce PARCEL's own best elasticity
+once the ladder is stretched to 8 levels; the extra levels dilute the gradient somewhat
+even under the better resampler.
+
+**Does v13 beat v8? No.** At the four shared levels:
+
+| level | MME-P | POPE-acc | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|
+| 256 | −32.2 | −3.14 | +2.43 | −6.41 | −3.96 |
+| 144 | −38.5 | −3.76 | +2.73 | −4.27 | −3.43 |
+| 64 | −23.9 | −2.73 | +3.47 | −1.76 | −2.88 |
+| 16 | −0.4 | −0.62 | +4.11 | +0.36 | −1.22 |
+
+v13 loses to v8 on MME/POPE/GQA at every level, ties or edges ahead on TextVQA only at
+16 tokens, and wins SciQA throughout — the same SciQA-tracks-inversely-with-LoRA
+pattern from §16m/§16l, here with LoRA fully off. The gap narrows sharply toward the
+low-budget end (16 tok is nearly a wash), which is consistent with vision LoRA mattering
+most at the levels where PARCEL's anchors carry the least information on their own.
+
+**Against the dense 576-token baseline, v13 is well short at every level it was meant
+to help most:** v13@256 is −18.94 TextVQA / −6.19 GQA / −6.79 SciQA against baseline;
+v13@576 (same token count as baseline, so *nothing* should be lost to compression) is
+−18.23 TextVQA / −6.34 GQA / −6.79 SciQA — i.e. almost identical to v13@256, meaning
+the extra 320 tokens at the top of the ladder buy essentially nothing over 256, which is
+the token-budget-has-no-effect pattern once again, just less severe than v6's version of it.
+
+**Verdict.** PARCEL is not merely a short-grid trick — it substantially rescues the
+long-ladder failure v6 exposed, confirming §16j's hypothesis. But "rescues" is not
+"solves": v13 still trails v8 by a wide margin on the metrics that matter most
+(TextVQA, GQA), and its own elasticity on the shared range is flatter than v8's or
+v11's. Combined with v14's still-pending result on whether ladder-direction matters,
+the standing recommendation is unchanged: **`final-parcel` (= v8) stays the recipe for
+the paper and for the Hipster backbone sweep** (§17c, §18). The 8-level ladder remains
+a research question, not a candidate replacement — worth one more run (v13 + vision
+LoRA on, isolating whether the LoRA-off confound above fully explains the v8 gap) if
+there is appetite for it, but not before v14 reports.
 
 
 ### 16l. v11 and v12 (hipster) close the ablation set: the final recipe is v8, and it is not close

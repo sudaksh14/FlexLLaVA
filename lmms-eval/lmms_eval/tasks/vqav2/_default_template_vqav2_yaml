@@ -1,6 +1,12 @@
 dataset_path: lmms-lab/VQAv2
 dataset_kwargs:
-  token: True
+  # lmms-lab/VQAv2 is public (gated=False, private=False as of 2026-09-16).
+  # token: True forces huggingface_hub to demand a LOCAL token regardless of
+  # access, so the load dies with LocalTokenNotFoundError on a machine that is
+  # simply not logged in -- which is what killed job 27432. Every task this repo
+  # actually evaluates (mme, pope, scienceqa, textvqa, gqa, vizwiz) uses
+  # token: False; this brings VQAv2 in line with them.
+  token: False
 output_type: generate_until
 doc_to_visual: !function utils.vqav2_doc_to_visual
 doc_to_text: !function utils.vqav2_doc_to_text
