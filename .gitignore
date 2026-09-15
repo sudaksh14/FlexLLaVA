@@ -25,6 +25,7 @@ output
 jobs
 debug
 CLAUDE.md
+publication
 
 checkpoints
 ckpts*
