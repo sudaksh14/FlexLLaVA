@@ -48,6 +48,7 @@ Every decision below is the user's; the "result" column is what actually happene
 | 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
 | 24 | Cluster-wide reboot (all 8 nodes down) interrupted v7-kd7b mid-training and truncated v6-tokrange's eval to 4/8 levels. Cancel v7-kd7b and its eval outright; requeue the missing v6-tokrange levels with the script bug fixed; resize v9-parcel-decorr to fit on A10 (node208) instead of A40 (node205) so node205 stays free; write up the backbone/PARCEL/decorr ablation matrix that doesn't fit locally as a pending-work list for the other ("hipster") cluster. | Done (§15). Found and fixed a real bug in `eval_lmms_level.sh` along the way: `jq`'s availability is inconsistent across compute nodes, so 4 of 8 v6-tokrange eval array tasks silently fell back to a wrong 4-level default and errored out even though `elastic_config.json` was present and correct the whole time — replaced with a `python3`-based parse (env-guaranteed) and a loud failure instead of a silent wrong-grid fallback. v7-kd7b (27299) + its eval (27300) cancelled; v6-tokrange's missing levels (576/512/448/384-token) requeued as job 27375 `--array=4-7`. v9-parcel-decorr requeued as job 27376/27377 with `--gres=gpu:A10:2` (was A40:2) — justified by v8-parcel, the identical architecture minus the decorrelation term, having already completed its full 84.5h run cleanly on node208's A10:2. |
 | 25 | Analyse v6's available eval levels and v8 against the earlier runs and say whether any introduced change actually helped; record the outcome; make **v8 the best working model**; drop rank-nested vision LoRA from all future runs including v9; queue **v10** with vision LoRA fixed at 16 for both stages; re-scope the hipster matrix to the v8 setup with vision LoRA off, stating in that section that v8 is the best-performing config and that vision LoRA is off; rename v6's eval folders correctly and verify the pending evals land in the right ones. | Done (§16). **Yes, one change helped: PARCEL (v8) — the only run with a real budget–accuracy gradient, and the new best model (§16c).** The other two introduced changes lost: rank-nested vision LoRA is a regression on both backbones (§16d, default now False), and the extended 576→16 ladder is a large regression (§16b, retired). Found along the way that §15b's root cause was recorded backwards: *every* task of job 27292 hit the `jq` fallback, so v6's four surviving results were not 256/144/64/16 at all but 576/512/448/384 written under the wrong labels — verified against the measured prefill FLOPs and relabelled (§16a). v9 cancelled and re-scoped onto v8's grid with LoRA off; v10 added; v11 deferred by decision; recipes moved out of submitting-shell env vars into `submit_elastic_run.sh` (+ a `docs/SUBMITTED_RUNS.tsv` job-id→recipe log) in git, after v9's ladder had to be recovered from circumstantial evidence. v9 requeued as 27378/27379 and v10 as 27380/27381, both `--array=0-3`; all 8 nodes were still `down` at submit time, so neither has started. |
+| 42 | Move the W&B API key out of the tracked scripts into `~/.netrc` or a non-committed env file, on `main`, and push. | Done (§20). The key was inline in **10** tracked `run_job*.sh` files as `#SBATCH --export=ALL,WANDB_API_KEY=…`, so it sat in the repo, in history, and on GitHub. Moved to `~/.netrc` (mode 600, `machine api.wandb.ai`) — wandb's native mechanism, needing no script logic since `$HOME` is shared with the compute nodes; every export line became a plain `--export=ALL`. Verified netrc resolves and that later `#SBATCH` directives (e.g. `--exclusive`) still apply, since SLURM scans through comments. `.gitignore` now blocks `.env`/`*.env`/`.netrc`/`secrets.sh`. **Flagged as NOT fixed by this change: the key remains in git history, on GitHub, and on the `hipster` branch — it must be rotated at wandb.ai, which is the only step that ends the exposure.** |
 | 41 | (Continuation) Validate both baselines with real training steps before committing multi-day jobs. | Done (§19e–g). **M3 passed both stages** (20 real steps each, 27418). **MQT was silently running OUR model**: FlexLLaVA's editable install registers a MetaPathFinder for `llava`, and `cd MQT-LLaVA` does not beat it because `sys.path[0]` is the *script's* dir, not the cwd — so MQT's train.py drove our model and crashed on a missing `query_abstractor`. The crash was luck; a different flag set could have trained to completion and produced numbers labelled "MQT" that were not MQT. Fixed with `PYTHONPATH` plus a guard that resolves `llava.__file__` and refuses to run otherwise. Also removed the `mm_projector` flags — MQT has no projector at all (diag 27419). After the fix MQT Stage 1 passes (27421) and forward+backward at 4 tokens is verified under transformers 4.44.2 (27424: loss 3.92 finite, grads reach the query bank). MQT Stage 2 OOM'd on **one** A10 during optimizer-state init, before step 1 — an artifact of smoking on a single GPU because both 2-GPU nodes were busy; our own Stage 2 needs 2 GPUs for the same reason. Retracted my earlier "MQT imports cleanly so the version risk didn't materialise": that import was resolving our package. |
 | 40 | Baseline runs for M3 and MQT at 4 tokens on TinyLlama, using THEIR train loops, our vision encoder/backbone/data/hyperparams; minimal and quick. | Done, PLANNED not submitted (§19). **M3 needed no new code** -- this repo is an M3 fork with the pure-M3 branch intact, so `MATRYOSHKA_SCALE=4` runs M3's own loop (12x12 avg-pool -> exactly 4 tokens, verified job 27415). **MQT initially appeared to run from its vendored tree** — that was WRONG, see decision 41: our editable install shadowed it and MQT's train.py was driving OUR model. Each method keeps its OWN Stage-1 convention (M3: plain 576-token projector; MQT: `first_stage`=256 queries) because that is part of the pipeline being baselined. Flagged two scope limits: a fixed 4-token budget narrows both methods (M3 normally trains a scale list, MQT normally samples a random count), so these are not M3/MQT headline numbers; and eval is NOT wired -- `eval_lmms_level.sh` requires `elastic_config.json` which these checkpoints lack. Also noticed the env is now transformers 4.44.2, not the 4.36.2 recorded in memory. |
 | 39 | Audit KD teacher compatibility per backbone, find family-matched teachers, build teacher-selection infrastructure, and plan the Hipster matrix. Audit first; launch nothing. | Done (§18). **The 7B teacher is valid for MobileLLaMA** (token IDs byte-identical to LLaVA's, verified by loading both tokenizers -- job 27410) and **invalid for SmolLM2 and Qwen** (49152 / 151936 vs 32000). **Neither family-matched teacher is usable**, smoke-tested not assumed (job 27411): MobileVLM_V2 fails with `Unknown projector type: ldpnetv2`; SmolVLM fails on architecture (Idefics3), on vocab (49155 vs the student's own 49152), and its tokenizer does not even load in this env. No Qwen VLM is in the local cache. Audited the KD mechanism itself: **logits KD only**, T hard-coded 1.0, weight 0.1/n_active, assistant-response positions only, teacher at full 576 visual tokens, CORAL self-sourced even with an external teacher, and `attach_kd_teacher` hard-codes the LLaVA-Llama loader. Built `kd_teachers.py` (registry + compatibility levels) wired into `attach_kd_teacher` so incompatible pairs are **refused, never substituted**; added `--kd_teacher/--kd_student_key/--kd_type`. Matrix is 12 core + 2 external-teacher, all **PLANNED**, nothing submitted. |
@@ -2580,3 +2581,55 @@ the first real 2-GPU MQT Stage 2 will be on Hipster.
 | `jobs/diag_mqt_build.sh` | **new** — proves MQT builds only `query_abstractor` (27419) |
 | `jobs/smoke_mqt_only.sh` | **new** — MQT-only 20-step smoke (27420, 27421) |
 | `jobs/smoke_mqt_forward.sh` | **new** — optimizer-free forward/backward check at 4 tokens (27424) |
+
+
+## 20. W&B credential removed from the tracked scripts (decision 42)
+
+Until 2026-09-15 every `run_job*.sh` on `main` carried the W&B key inline:
+
+```
+#SBATCH --export=ALL,WANDB_API_KEY=<40-hex-key>
+```
+
+Ten tracked files, so the key was in the repository, in every commit that
+touched them, and on GitHub.
+
+**Moved to `~/.netrc`** (mode 600), which is wandb's own credential mechanism:
+
+```
+machine api.wandb.ai
+  login user
+  password <key>
+```
+
+That needs no script logic at all — wandb reads it directly on the compute
+node, and `$HOME` is shared between login and compute nodes here, so there is
+nothing to export. Every `--export=ALL,WANDB_API_KEY=…` became a plain
+`--export=ALL` with a comment pointing at the netrc. Verified the file parses
+and resolves (`netrc.authenticators("api.wandb.ai")` returns a 40-char
+password), and that later `#SBATCH` directives still take effect — SLURM
+continues scanning through comment lines, so `--exclusive` further down
+`run_job_slm.sh` is unaffected.
+
+`.gitignore` gained `.env`, `.env.*`, `*.env`, `.netrc`, `secrets.sh`,
+`wandb.env` so an env-file alternative cannot be added by accident.
+
+### THE KEY IS STILL COMPROMISED — ROTATE IT
+
+Scrubbing the working tree does **not** remove the key from git history. It
+remains in every prior commit on `main`, is still reachable on GitHub, and is
+still present on the **`hipster` branch**, which was not part of this change
+(`run_job.sh`, `run_job_baseline_slm.sh`, `run_job_finetune_slm.sh`,
+`run_job_hipster.sh`, `run_job_hipster_finetune_only.sh`, and the two baseline
+wrappers added in 116ac14). Anyone who has cloned or forked the repository
+already has it.
+
+Required follow-up, in order:
+
+1. **Revoke and regenerate the key** at wandb.ai → Settings → API keys. This is
+   the only step that actually ends the exposure; everything else is hygiene.
+2. `wandb login` with the new key to rewrite `~/.netrc`.
+3. Apply the same scrub to the `hipster` branch.
+4. Optionally rewrite history (`git filter-repo`, or BFG) — worth it only if
+   the repository is or will become public; it rewrites every commit hash and
+   breaks existing clones.

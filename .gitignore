@@ -41,3 +41,14 @@ llava/eval/table/results/test_sqa_llava_lcs_558k_sqa_12e_vicuna_v1_3_13b.json
 IG-VLM/.git_org
 lmms-eval/.git_org
 llava/eval/table/results/test_sqa_llava_13b_v0.json
+
+# Credentials must never be committed. W&B auth lives in ~/.netrc (mode 600,
+# machine api.wandb.ai), outside the repo entirely; these patterns exist so a
+# local env file used as an alternative cannot be added by accident. Until
+# 2026-09-15 the W&B key was inline in every run_job*.sh --export line.
+.env
+.env.*
+*.env
+.netrc
+secrets.sh
+wandb.env
