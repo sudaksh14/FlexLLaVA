@@ -8,7 +8,13 @@
 #SBATCH --gres=gpu:l4:2
 #SBATCH --cpus-per-task=16
 #SBATCH --output=./jobs/run_hipster_das6data_%A.out
-#SBATCH --export=ALL,WANDB_API_KEY=dfcd2574507b9ebe69ca13ab6f6925d864e82ee0
+#SBATCH --export=ALL
+# W&B credentials are NOT in this file. They live in ~/.netrc (mode 600,
+# machine api.wandb.ai), which wandb reads natively on the compute node --
+# $HOME is shared with the login node, so nothing needs exporting. Set it up
+# once with `wandb login`, or write the three-line netrc stanza by hand.
+# Previously this line carried the key inline, which put it in every commit
+# and on GitHub; see docs/EXPERIMENT_JOURNAL.md section 20.
 #
 # Stage 1 ONLY -- no finetune_elastic_slm_hipster.sh call. Mirrors DAS-6's
 # run_job_pretrain_slm.sh, adapted for hipster: hipster paths (via
