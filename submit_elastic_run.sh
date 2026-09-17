@@ -259,8 +259,48 @@ case "$RUN" in
     export USE_TOKEN_DECORRELATION=False
     export TEACHER=self
     ;;
+  final-parcel-so400m)
+    # final-parcel (v8's best config) with SigLIP so400m-patch14-384 instead of
+    # CLIP-L/14-336. NOT a drop-in VISION_TOWER swap: so400m's 384/14=27.43 grid
+    # rounds to 27x27=729 patches, whose only integer-pooling anchor counts are
+    # {1,9,81,729} (729=3^6) vs CLIP's 576-patch {1,4,9,16,36,64,144,576}. Under
+    # final-parcel's own anchor_mode=ratio, that gap makes the intended 25% split
+    # badly miss at 256 tokens (ratio's round-then-snap-DOWN-only search rounds
+    # 256*0.25=64, finds nothing reachable at or below 64 except 9, and can never
+    # reach 81 -- which sits ABOVE the naive target but is the closest reachable
+    # value overall). Verified in code (job 27464, not just by hand):
+    #   budget   ratio-mode picks      best reachable (this recipe)
+    #   256      9   (3.5%)            81  (31.6%)   <- the one real difference
+    #   144      9   (6.2%)            9   (6.2%)    <- ratio already optimal
+    #   64       9   (14.1%)           9   (14.1%)   <- ratio already optimal
+    #   16       1   (6.2%)            1   (6.2%)    <- ratio already optimal
+    # So anchor_mode=fixed only changes the 256-token level; the other three were
+    # already at their best reachable value under ratio mode despite the raw
+    # percentages looking off. Table derived two ways (closest to the 25% target;
+    # largest reachable count that stays a minority of the budget) -- they agree
+    # exactly, and n_anchors_for() reproduces the table exactly at all 4 budgets.
+    #
+    # SmolLM2 (1.7B, largest LLM here) + so400m (428M, 1.41x CLIP-L's params) OOM'd
+    # in Stage 2 on a single 24GB A10 during backward (job 27461, 22.28/22.30GB
+    # used) -- confirmed a capacity ceiling, not a bug: passed cleanly on a single
+    # UNSHARDED A40 (job 27463, a harder memory test than the real 2-GPU config).
+    # This recipe therefore needs A40, not A10/untyped gpu:2 -- see GRES below.
+    export ELASTIC_RUN_TAG=final-parcel-so400m
+    export TOK_LEVELS="256 144 64 16"
+    export LORA_RANKS="8 16 32 64"
+    export STAGE1_TOK_LEVEL=256
+    export STAGE1_LORA_RANK=64
+    export VISION_LORA_ENABLE=True
+    export VISION_LORA_SPECIALIZE_TOK=True
+    export USE_TOKEN_DECORRELATION=False
+    export TEACHER=self
+    export VISION_TOWER=google/siglip-so400m-patch14-384
+    export ANCHOR_MODE=fixed
+    export ANCHOR_ROUTING="256:81,144:9,64:9,16:1"
+    DEFAULT_GRES="gpu:A40:2"
+    ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m}" >&2
     exit 1
     ;;
 esac
@@ -274,7 +314,7 @@ ARRAY="0-$(( N_LEVELS - 1 ))"
 
 echo "── ${ELASTIC_RUN_TAG} (${SLM_KEY}) ──────────────────────────────"
 for v in TOK_LEVELS LORA_RANKS STAGE1_TOK_LEVEL STAGE1_LORA_RANK RESAMPLER_ARCH \
-         ANCHOR_MODE ANCHOR_RATIO USE_TOKEN_DECORRELATION DECORR_WEIGHT \
+         ANCHOR_MODE ANCHOR_RATIO ANCHOR_ROUTING USE_TOKEN_DECORRELATION DECORR_WEIGHT \
          VISION_LORA_ENABLE VISION_LORA_SPECIALIZE_TOK TEACHER TEACHER_MODEL_PATH \
          PREFIX_KL_WEIGHT VISION_TOWER; do
     printf '  %-26s %s\n' "$v" "${!v:-<launcher default>}"
