@@ -139,6 +139,45 @@ case "$RUN" in
     # capacity than were tested); if it OOMs again, that is new information
     # (4-way still insufficient), not a repeat of the known 2-way failure.
     ;;
+  v8-siglip-so400m-adaptive-parcel)
+    # Same as v8-siglip-so400m-parcel (true v8/final-parcel + SigLIP
+    # so400m-patch14-384), but anchors via the NEW anchor_mode=adaptive fork
+    # (llava/model/elastic/resampler.py's pool_anchors_adaptive, merged from
+    # main) instead of anchor_mode=fixed's snapped table.
+    #
+    # v8-siglip-so400m-parcel's fixed table (256:81,144:9,64:9,16:1) exists
+    # ONLY because plain avg-pooling anchor_mode=fixed/ratio requires an
+    # anchor count that evenly divides so400m's 27x27=729-patch grid via
+    # integer stride -- so400m's only such counts are {1,9,81,729} (729=3^6),
+    # nowhere near a clean 25% at every budget (81/256=31.6%, not 25%).
+    # anchor_mode=adaptive removes that constraint entirely: pool_anchors_
+    # adaptive() uses F.adaptive_avg_pool2d, which accepts ANY anchor count in
+    # [1, P], so the exact 25% target is directly reachable at every level --
+    # no snapping, no approximation:
+    #   budget   25% target   adaptive anchors (exact)
+    #   256      64           64
+    #   144      36           36
+    #   64       16           16
+    #   16       4            4
+    # This is the same anchor_routing table CLIP's 576-patch grid gets under
+    # plain ratio mode (64/36/16/4 IS v8's original fixed table, see decision
+    # 35/submit_elastic_run.sh's final-parcel case) -- adaptive mode lets
+    # so400m match that exact split despite its grid not factoring the same
+    # way CLIP's does.
+    export ELASTIC_RUN_TAG=v8-siglip-so400m-adaptive-parcel
+    export LORA_RANKS="8 16 32 64"
+    export STAGE1_LORA_RANK=64
+    export VISION_LORA_ENABLE=True
+    export VISION_LORA_SPECIALIZE_TOK=True
+    export USE_TOKEN_DECORRELATION=False
+    export VISION_TOWER="google/siglip-so400m-patch14-384"
+    export ANCHOR_MODE=adaptive
+    export ANCHOR_ROUTING="256:64,144:36,64:16,16:4"
+    # Same untested-at-4-GPU OOM caveat as v8-siglip-so400m-parcel above
+    # applies to SmolLM2 with this recipe too (same backbone+tower memory
+    # footprint, anchor_mode doesn't change parameter count) -- not restricted
+    # here either, for the same reason.
+    ;;
   v12-parcel-kd7b)
     # v11 + a frozen external LLaVA-1.5-7B KD teacher.
     case "$SLM_KEY" in
@@ -174,7 +213,7 @@ case "$RUN" in
     fi
     ;;
   *)
-    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b|v8-siglip-parcel|v8-siglip-so400m-parcel} {tinyllama|smollm2|mobilellama} [performance|capacity]" >&2
+    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b|v8-siglip-parcel|v8-siglip-so400m-parcel|v8-siglip-so400m-adaptive-parcel} {tinyllama|smollm2|mobilellama} [performance|capacity]" >&2
     exit 1
     ;;
 esac
