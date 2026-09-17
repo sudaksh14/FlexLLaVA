@@ -73,7 +73,7 @@ fi
 echo "[mqt-baseline] llava package -> ${_resolved} (MQT's, verified)"
 
 deepspeed --num_gpus ${NUM_GPUS} --master_port ${MASTER_PORT} llava/train/train.py \
-    --deepspeed ./scripts/zero2.json \
+    --deepspeed "${REPO_ROOT}/scripts/zero2.json" \
     --model_name_or_path "${MODEL_PATH}" \
     --version "${CONV_VERSION}" \
     --data_path ${LOCAL_SSD}/LLaVA-Finetune/llava_v1_5_mix665k.json \
