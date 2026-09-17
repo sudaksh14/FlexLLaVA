@@ -23,3 +23,7 @@ elastic-finetune-mobilellama-m-v8lora-kdoff,256tok,256,1154.38,238.57,83.86,82.2
 elastic-finetune-mobilellama-m-v8lora-kdoff,144tok,144,1162.7,232.5,83.58,81.98,47.94,24.96,55.14,0.521,0916_1324_elastic_144tok_llava_elastic_model_args_c5cb8a
 elastic-finetune-mobilellama-m-v8lora-kdoff,64tok,64,1124.93,223.93,82.07,80.17,47.89,21.33,54.13,0.318,0916_1325_elastic_64tok_llava_elastic_model_args_24a9ff
 elastic-finetune-mobilellama-m-v8lora-kdoff,16tok,16,1082.55,211.79,80.84,78.36,48.19,18.06,52.35,0.198,0916_1333_elastic_16tok_llava_elastic_model_args_219eaa
+elastic-finetune-mobilellama-m-v8lora-kd7b,256tok,256,1153.77,211.79,83.64,81.98,43.98,26.25,56.15,0.809,0917_1613_elastic_256tok_llava_elastic_model_args_1a8d38
+elastic-finetune-mobilellama-m-v8lora-kd7b,144tok,144,1137.61,208.57,83.86,82.34,40.56,23.49,54.62,0.521,0917_1613_elastic_144tok_llava_elastic_model_args_df96f6
+elastic-finetune-mobilellama-m-v8lora-kd7b,64tok,64,1091.42,198.21,82.19,80.35,39.86,20.07,53.41,0.318,0917_1642_elastic_64tok_llava_elastic_model_args_f5cf4b
+elastic-finetune-mobilellama-m-v8lora-kd7b,16tok,16,1062.06,200.36,80.84,78.42,41.75,17.04,51.69,0.198,0917_1651_elastic_16tok_llava_elastic_model_args_be4937

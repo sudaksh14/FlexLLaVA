@@ -73,6 +73,25 @@ case "$RUN" in
     export LORA_RANKS="8 16 32 64"
     export STAGE1_LORA_RANK=64
     ;;
+  v8-siglip-parcel)
+    # True v8/final-parcel (see submit_elastic_run.sh's final-parcel case),
+    # verbatim, with SigLIP swapped in for CLIP. google/siglip-base-patch16-384
+    # per docs/EXPERIMENT_JOURNAL.md section 10b: 384/16=24 gives the identical
+    # 576-patch grid as CLIP-L/14-336, so the token ladder and LoRA ranks
+    # transfer with zero changes. USE_KD deliberately left unset here (defaults
+    # True in train_elastic.py) to match v8's own default -- prefix-KL
+    # self-distillation with TEACHER=self (set globally above), not off.
+    # Smoke-tested on DAS-6 for 3 steps (TinyLlama only, job 27326) but never
+    # run to completion on any cluster; SmolLM2+SigLIP has no test history at
+    # all before this run.
+    export ELASTIC_RUN_TAG=v8-siglip-parcel
+    export LORA_RANKS="8 16 32 64"
+    export STAGE1_LORA_RANK=64
+    export VISION_LORA_ENABLE=True
+    export VISION_LORA_SPECIALIZE_TOK=True
+    export USE_TOKEN_DECORRELATION=False
+    export VISION_TOWER="google/siglip-base-patch16-384"
+    ;;
   v12-parcel-kd7b)
     # v11 + a frozen external LLaVA-1.5-7B KD teacher.
     case "$SLM_KEY" in
@@ -108,7 +127,7 @@ case "$RUN" in
     fi
     ;;
   *)
-    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b} {tinyllama|smollm2} [performance|capacity]" >&2
+    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b|v8-siglip-parcel} {tinyllama|smollm2} [performance|capacity]" >&2
     exit 1
     ;;
 esac
