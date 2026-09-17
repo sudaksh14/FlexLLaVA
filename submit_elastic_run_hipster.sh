@@ -92,6 +92,59 @@ case "$RUN" in
     export USE_TOKEN_DECORRELATION=False
     export VISION_TOWER="google/siglip-base-patch16-384"
     ;;
+  v8-siglip-so400m-parcel)
+    # True v8/final-parcel (see submit_elastic_run.sh's final-parcel case),
+    # with SigLIP so400m-patch14-384 in place of CLIP -- the larger of the two
+    # SigLIP checkpoints (428M vision params, 1.41x CLIP-L's 303M; the sibling
+    # v8-siglip-parcel above uses siglip-base-patch16-384, 0.31x CLIP-L, a
+    # SMALLER tower, not a scaled variant of the same model).
+    #
+    # so400m's 384/14=27.43 grid rounds to 27x27=729 patches. 729=3^6, so its
+    # only integer-pooling anchor counts are {1,9,81,729} vs CLIP's 576-patch
+    # {1,4,9,16,36,64,144,576} -- anchor_mode=ratio's automatic 25% target
+    # therefore snaps DOWN-only and gets stuck at 9 anchors (3.5%) at the
+    # 256-token level specifically (round(256*0.25)=64 is unreachable, and the
+    # snap-down search can never find 81, which sits ABOVE that target but is
+    # the closest reachable value overall). The other three levels (144/64/16)
+    # were already at their best reachable value under plain ratio mode.
+    # anchor_mode=fixed with the table below is the corrected version -- table
+    # derived two independent ways (closest to the 25% target; largest
+    # reachable count that stays a minority of the budget) that agree exactly,
+    # and validated against n_anchors_for() directly, not by hand (DAS-6 job
+    # 27464). Smoke-tested end to end on DAS-6 (job 27465, TinyLlama, both
+    # stages, `anchor_mode`/`anchor_routing` confirmed round-tripped correctly
+    # into the saved checkpoint's own elastic_config.json) before this recipe
+    # was written.
+    export ELASTIC_RUN_TAG=v8-siglip-so400m-parcel
+    export LORA_RANKS="8 16 32 64"
+    export STAGE1_LORA_RANK=64
+    export VISION_LORA_ENABLE=True
+    export VISION_LORA_SPECIALIZE_TOK=True
+    export USE_TOKEN_DECORRELATION=False
+    export VISION_TOWER="google/siglip-so400m-patch14-384"
+    export ANCHOR_MODE=fixed
+    export ANCHOR_ROUTING="256:81,144:9,64:9,16:1"
+    # so400m is 428M params, 1.41x CLIP-L -- SmolLM2 (1.7B, the largest LLM run
+    # here) OOM'd on a single 24GB A10 in Stage 2 backward (DAS-6 job 27461,
+    # 22.28/22.30GB used) and needed A40 (46GB) to clear; confirmed a capacity
+    # ceiling, not a bug, by passing on a single UNSHARDED A40 (job 27463), a
+    # HARDER memory test than the real 2-GPU config. capacity's L4 is the same
+    # 24GB class as the A10 that OOM'd, so the same refusal v12 already applies
+    # for a different reason (frozen-7B VRAM) applies here for SmolLM2 only --
+    # TinyLlama and MobileLLaMA (smaller LLMs) cleared so400m fine on that same
+    # A10 and are not restricted.
+    if [ "$SLM_KEY" = "smollm2" ]; then
+        DEFAULT_PARTITION="performance"
+        if [ -n "$PARTITION_ARG" ] && [ "$PARTITION_ARG" != "performance" ]; then
+            echo "ERROR: v8-siglip-so400m-parcel + smollm2 needs 'performance' (RTX" >&2
+            echo "       6000 Ada, 48GB) -- so400m's larger tower OOM'd a 24GB A10 in" >&2
+            echo "       Stage 2 for this exact backbone (DAS-6 job 27461); 'capacity'" >&2
+            echo "       (L4, 24GB) is the same VRAM class and expected to repeat it." >&2
+            echo "       Requested partition '$PARTITION_ARG' refused." >&2
+            exit 1
+        fi
+    fi
+    ;;
   v12-parcel-kd7b)
     # v11 + a frozen external LLaVA-1.5-7B KD teacher.
     case "$SLM_KEY" in
@@ -127,7 +180,7 @@ case "$RUN" in
     fi
     ;;
   *)
-    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b|v8-siglip-parcel} {tinyllama|smollm2} [performance|capacity]" >&2
+    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b|v8-siglip-parcel|v8-siglip-so400m-parcel} {tinyllama|smollm2|mobilellama} [performance|capacity]" >&2
     exit 1
     ;;
 esac
@@ -153,7 +206,7 @@ ARRAY="0-$(( N_LEVELS - 1 ))"
 
 echo "── ${ELASTIC_RUN_TAG} (${SLM_KEY}) on hipster:${PARTITION} ──────────────────"
 for v in TOK_LEVELS LORA_RANKS STAGE1_TOK_LEVEL STAGE1_LORA_RANK RESAMPLER_ARCH \
-         ANCHOR_MODE ANCHOR_RATIO USE_TOKEN_DECORRELATION DECORR_WEIGHT \
+         ANCHOR_MODE ANCHOR_RATIO ANCHOR_ROUTING USE_TOKEN_DECORRELATION DECORR_WEIGHT \
          VISION_LORA_ENABLE VISION_LORA_SPECIALIZE_TOK TEACHER TEACHER_MODEL_PATH \
          PREFIX_KL_WEIGHT VISION_TOWER; do
     printf '  %-26s %s\n' "$v" "${!v:-<launcher default>}"
