@@ -1,6 +1,9 @@
 #!/bin/bash
-# Submit a Stage-2-only run using hipster's own /home/skalra/llava_data
-# archives (not DAS-6 -- see submit_finetune_only_das6.sh for that variant).
+# Submit a Stage-2-only run via run_job_hipster_finetune_only.sh. Data source
+# is DAS-6 over SSH (hipster's own /home/skalra/llava_data archive was
+# deleted 2026-09-19) -- same source as submit_finetune_only_das6.sh now;
+# the two remain separate scripts but are no longer differentiated by data
+# source.
 # Two cases, both handled automatically by train.py itself:
 #   - a checkpoint-N already exists under the Stage-2 output dir -> resumes
 #     from it (Stage-1 checkpoint irrelevant, need not exist)

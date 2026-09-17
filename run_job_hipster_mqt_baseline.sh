@@ -75,9 +75,19 @@ echo "[mqt-baseline] NUM_VISUAL_TOKENS=${NUM_VISUAL_TOKENS:-4}"
 # recipes submitted close together) can land on the same physical node since
 # nothing here is --exclusive, and a shared fixed path would let one job's
 # `trap ... rm -rf` cleanup delete the other's in-flight data mid-run.
-STAGING=/home/skalra/llava_data
+DAS6_HOST=fs2.das6.science.uva.nl
+DAS6_DATA=/var/scratch/skalra/flexllava/data
 LOCAL_SSD=/local_scratch/skalra/flexllava_data_${SLURM_JOB_ID}
-mkdir -p "$LOCAL_SSD"
+mkdir -p "$LOCAL_SSD/LLaVA-Pretrain" "$LOCAL_SSD/LLaVA-Finetune"
+
+echo "Checking SSH reachability from this compute node to $DAS6_HOST ..."
+if ! timeout 15 ssh -o BatchMode=yes -o ConnectTimeout=10 "$DAS6_HOST" "echo ok" 2>&1; then
+    echo "ERROR: cannot reach $DAS6_HOST via SSH from $(hostname)." \
+         "Compute nodes may have restricted outbound network access even" \
+         "when the login node can reach it." >&2
+    exit 1
+fi
+echo "SSH OK."
 
 REQUIRED_SPACE_GB=110
 AVAILABLE_SPACE_GB=$(df --output=avail -BG "$LOCAL_SSD" | tail -1 | tr -dc '0-9')
@@ -89,54 +99,60 @@ fi
 
 trap "echo 'Cleaning up local SSD...'; rm -rf $LOCAL_SSD" EXIT
 
-echo "Staging data $STAGING -> $LOCAL_SSD ..."; date
-N_PARALLEL="${STAGE_PARALLEL:-16}"
-ARCHIVE_DIR="$STAGING/archives"
+echo "Streaming LLaVA-Pretrain + LLaVA-Finetune from $DAS6_HOST -> $LOCAL_SSD ..."; date
+# hipster's own /home/skalra/llava_data archive was deleted 2026-09-19 to
+# reclaim disk (home filesystem was at 96% capacity, 191G/200G used) -- DAS-6
+# is now the only data source for every hipster job, streamed straight to
+# /local_scratch per job. Same mechanism run_job_pretrain_only_hipster.sh /
+# run_job_hipster_finetune_only_das6.sh already used for the elastic/matrix
+# jobs; this just combines both trees since this launcher runs Stage 1 and
+# Stage 2 back to back in one job. Namespaced by $SLURM_JOB_ID for the same
+# reason as the old local-archive path: two of our own jobs can land on the
+# same node since nothing here is --exclusive.
+N_PARALLEL="${STAGE_PARALLEL:-8}"
 
-if [ -d "$ARCHIVE_DIR" ] && [ -n "$(command find "$ARCHIVE_DIR" -name '*.tar' -print -quit 2>/dev/null)" ]; then
-    # Fast path: one-time tar archival (jobs/archive_llava_data.sh) has run,
-    # so $STAGING/{LLaVA-Pretrain,LLaVA-Finetune} raw trees may be partially
-    # or fully replaced by $ARCHIVE_DIR/*.tar. Each tar is a single large
-    # sequential NFS read (fast) + local extraction (fast, no network) --
-    # no per-file NFS round trips at all, versus the ~1180 files/s serial
-    # rate measured on this cluster (2026-09-09) for the raw many-small-
-    # files tree. Extraction is parallelized across tars, same as the
-    # fallback path below is parallelized across files.
-    echo "Using pre-built archives in $ARCHIVE_DIR"
-    mkdir -p "$LOCAL_SSD/LLaVA-Pretrain" "$LOCAL_SSD/LLaVA-Finetune"
-    find "$ARCHIVE_DIR" -name '*.tar' -print0 \
-        | xargs -0 -P "$N_PARALLEL" -I{} tar -xf {} -C "$LOCAL_SSD"
-    # Any files archival hasn't reached yet (still raw) -- copy those too, so
-    # this script is correct regardless of how far archival has progressed
-    # at the moment a training job happens to start. This ALSO covers the
-    # two annotation JSONs (blip_laion_cc_sbu_558k.json,
-    # llava_v1_5_mix665k.json), which archival deliberately never tars.
-    # `cd` first and use RELATIVE dir names: `cp --parents` reproduces
-    # whatever path form it's given, so an absolute `$STAGING/$d` path here
-    # would land files at "$LOCAL_SSD/home/skalra/llava_data/..." instead of
-    # "$LOCAL_SSD/LLaVA-Pretrain/..." where the training scripts expect them
-    # -- caught 2026-09-10 in a bounded local test before it could ship.
-    ( cd "$STAGING" && command find LLaVA-Pretrain LLaVA-Finetune -type f -print0 2>/dev/null \
-        | xargs -0 -r -P "$N_PARALLEL" -n 500 cp --parents -t "$LOCAL_SSD" 2>/dev/null || true )
-else
-    # Fallback: raw tree, no archives yet. Parallel at FILE granularity, not
-    # directory granularity -- LLaVA-Pretrain has 665 shard dirs (fine either
-    # way) but LLaVA-Finetune is only 5-6 leaf dirs each holding 100k+ FLAT
-    # files (coco/train2017, gqa/images, ...), so fanning out over top-level
-    # dirs there caps parallelism at ~6-way regardless of -P. `cp --parents`
-    # preserves each file's path relative to $STAGING under $LOCAL_SSD;
-    # -n 500 batches files per cp invocation so process-spawn overhead
-    # doesn't dominate at file-level granularity. Measured 2026-09-09: a
-    # serial cp -r ran at ~68MB/s / ~1180 files/s; this file-level -P 16
-    # approach ran a small flat-directory sample ~3-4x faster.
-    cd "$STAGING"
-    command find LLaVA-Pretrain LLaVA-Finetune -type f -print0 \
-        | xargs -0 -P "$N_PARALLEL" -n 500 cp --parents -t "$LOCAL_SSD"
-    cd /home/skalra/FlexLLaVA
+echo "Listing LLaVA-Pretrain shards on $DAS6_HOST ..."
+mapfile -t SHARDS < <(timeout 30 ssh -o BatchMode=yes "$DAS6_HOST" \
+    "find '$DAS6_DATA/LLaVA-Pretrain' -mindepth 1 -maxdepth 1 -type d -printf '%f\n'" | sort)
+echo "${#SHARDS[@]} LLaVA-Pretrain shard dirs found."
+
+PIDS=()
+for i in $(seq 0 $(( N_PARALLEL - 1 ))); do
+    CHUNK=()
+    for ((j=i; j<${#SHARDS[@]}; j+=N_PARALLEL)); do CHUNK+=("${SHARDS[$j]}"); done
+    [ ${#CHUNK[@]} -eq 0 ] && continue
+    ssh -o BatchMode=yes "$DAS6_HOST" "tar -cf - -C $DAS6_DATA/LLaVA-Pretrain ${CHUNK[*]}" \
+        | tar -xf - -C "$LOCAL_SSD/LLaVA-Pretrain" &
+    PIDS+=($!)
+done
+scp -o BatchMode=yes -q "$DAS6_HOST:$DAS6_DATA/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json" \
+    "$LOCAL_SSD/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json" &
+PIDS+=($!)
+
+# One tar-over-ssh pipe per top-level LLaVA-Finetune dir, run in parallel --
+# same principle as the pretrain shard chunking above: a single sequential
+# stream per dataset avoids per-file SSH/protocol overhead. No compression
+# (tar cf, not czf): payload is JPEGs, already compressed.
+for d in coco gqa ocr_vqa textvqa vg; do
+    ssh -o BatchMode=yes "$DAS6_HOST" "tar -cf - -C $DAS6_DATA/LLaVA-Finetune $d" \
+        | tar -xf - -C "$LOCAL_SSD/LLaVA-Finetune" &
+    PIDS+=($!)
+done
+scp -o BatchMode=yes -q "$DAS6_HOST:$DAS6_DATA/LLaVA-Finetune/llava_v1_5_mix665k.json" \
+    "$LOCAL_SSD/LLaVA-Finetune/llava_v1_5_mix665k.json" &
+PIDS+=($!)
+
+FAIL=0
+for pid in "${PIDS[@]}"; do
+    wait "$pid" || FAIL=1
+done
+if [ "$FAIL" -ne 0 ]; then
+    echo "ERROR: one or more DAS-6 transfer streams failed -- see output above." >&2
+    exit 1
 fi
 
+echo "Transfer done."; date
 du -sh "$LOCAL_SSD"/*
-echo "Staging done."; date
 export LOCAL_SSD
 
 # --- Stage 1 (first_stage = 256 queries) then Stage 2 (@ NUM_VISUAL_TOKENS) ---

@@ -27,9 +27,10 @@
 #       sh sets this from CHECKPOINT_ROOT/elastic-pretrain-<key>-<tag>
 #       automatically) -- skips redoing Stage 1 when it already finished
 #       elsewhere (e.g. a checkpoint transferred in from another cluster).
-# Data source: hipster's own /home/skalra/llava_data archives (same fast
-# path as run_job_hipster.sh) -- LLaVA-Finetune only, since Stage 2 never
-# reads LLaVA-Pretrain.
+# Data source: DAS-6 over SSH (hipster's own /home/skalra/llava_data archive
+# was deleted 2026-09-19 to reclaim disk) -- LLaVA-Finetune only, since
+# Stage 2 never reads LLaVA-Pretrain. Same streaming mechanism as
+# run_job_hipster_finetune_only_das6.sh.
 #
 # NO --exclusive, same shared-cluster etiquette as run_job_hipster.sh.
 
@@ -56,9 +57,17 @@ export HF_HOME=/home/skalra/flexllava_saves/cache/huggingface
 SLM_KEY=${1:-tinyllama}
 echo "[FlexLLaVA] SLM_KEY=${SLM_KEY}  ELASTIC_RUN_TAG=${ELASTIC_RUN_TAG:-<none>}  (finetune-only, hipster data source)"
 
-STAGING=/home/skalra/llava_data
+DAS6_HOST=fs2.das6.science.uva.nl
+DAS6_DATA=/var/scratch/skalra/flexllava/data/LLaVA-Finetune
 LOCAL_SSD=/local_scratch/skalra/flexllava_data_${SLURM_JOB_ID}
 mkdir -p "$LOCAL_SSD/LLaVA-Finetune"
+
+echo "Checking SSH reachability from this compute node to $DAS6_HOST ..."
+if ! timeout 15 ssh -o BatchMode=yes -o ConnectTimeout=10 "$DAS6_HOST" "echo ok" 2>&1; then
+    echo "ERROR: cannot reach $DAS6_HOST via SSH from $(hostname)." >&2
+    exit 1
+fi
+echo "SSH OK."
 
 REQUIRED_SPACE_GB=75
 AVAILABLE_SPACE_GB=$(df --output=avail -BG "$LOCAL_SSD" | tail -1 | tr -dc '0-9')
@@ -70,29 +79,34 @@ fi
 
 trap "echo 'Cleaning up local SSD...'; rm -rf $LOCAL_SSD" EXIT
 
-echo "Staging LLaVA-Finetune only: $STAGING -> $LOCAL_SSD ..."; date
-N_PARALLEL="${STAGE_PARALLEL:-16}"
-ARCHIVE_DIR="$STAGING/archives/LLaVA-Finetune"
+echo "Streaming LLaVA-Finetune from $DAS6_HOST:$DAS6_DATA -> $LOCAL_SSD/LLaVA-Finetune ..."; date
+# hipster's own /home/skalra/llava_data archive was deleted 2026-09-19 to
+# reclaim disk -- DAS-6 is now the only data source, same mechanism
+# run_job_hipster_finetune_only_das6.sh already used. One tar-over-ssh pipe
+# per top-level dir, run in parallel; no compression (payload is JPEGs,
+# already compressed).
+PIDS=()
+for d in coco gqa ocr_vqa textvqa vg; do
+    ssh -o BatchMode=yes "$DAS6_HOST" "tar -cf - -C $DAS6_DATA $d" \
+        | tar -xf - -C "$LOCAL_SSD/LLaVA-Finetune" &
+    PIDS+=($!)
+done
+scp -o BatchMode=yes -q "$DAS6_HOST:$DAS6_DATA/llava_v1_5_mix665k.json" \
+    "$LOCAL_SSD/LLaVA-Finetune/llava_v1_5_mix665k.json" &
+PIDS+=($!)
 
-if [ -d "$ARCHIVE_DIR" ] && [ -n "$(command find "$ARCHIVE_DIR" -name '*.tar' -print -quit 2>/dev/null)" ]; then
-    echo "Using pre-built archives in $ARCHIVE_DIR"
-    find "$ARCHIVE_DIR" -name '*.tar' -print0 \
-        | xargs -0 -P "$N_PARALLEL" -I{} tar -xf {} -C "$LOCAL_SSD"
-    # Leftover raw files (annotation JSON, anything archival hasn't reached).
-    # `cd` first, relative dir name -- see run_job_hipster.sh's 2026-09-10
-    # note on why an absolute path here silently lands files in the wrong
-    # place under `cp --parents`.
-    ( cd "$STAGING" && command find LLaVA-Finetune -type f -print0 2>/dev/null \
-        | xargs -0 -r -P "$N_PARALLEL" -n 500 cp --parents -t "$LOCAL_SSD" 2>/dev/null || true )
-else
-    ( cd "$STAGING" && command find LLaVA-Finetune -type f -print0 \
-        | xargs -0 -P "$N_PARALLEL" -n 500 cp --parents -t "$LOCAL_SSD" )
+FAIL=0
+for pid in "${PIDS[@]}"; do
+    wait "$pid" || FAIL=1
+done
+if [ "$FAIL" -ne 0 ]; then
+    echo "ERROR: one or more DAS-6 transfer streams failed -- see output above." >&2
+    exit 1
 fi
 
+echo "Transfer done."; date
 du -sh "$LOCAL_SSD"/LLaVA-Finetune/*
-echo "Staging done."; date
 export LOCAL_SSD
-
 ./scripts/v1_5/finetune_elastic_slm_hipster.sh "$SLM_KEY"
 
 echo "Job Complete"; date
