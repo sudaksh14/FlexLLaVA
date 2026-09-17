@@ -48,6 +48,9 @@ Every decision below is the user's; the "result" column is what actually happene
 | 23 | Research-only survey of adaptive input token budget allocation across the early-exit / MoE / cascade / speculative-decoding / KV-cache literature, including §12 mechanism D, with the KV-cache-under-escalation problem considered for every action point; write it up as a standalone doc with the actionable items loopable into this codebase. | [ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md](ADAPTIVE_INPUT_TOKEN_BUDGET_ALLOCATION.md). Key outcomes: (a) adaptive *total* budget per image is well-trodden (a dozen works, several already using effective rank as the router signal) — mechanism D is not a novelty claim; (b) no work found reusing KV across a budget escalation inside a VLM's LLM — the nearest are WaveCLIP (encoder-side causal cross-level attention), CacheBlend/VLCache (partial recompute), and LayerSkip/SpecVLM (make the cheap pass a draft); (c) for *this* stack the KV question is mostly moot: the budget-independent vision tower is 36% of FLOPs, so a 16-token pass costs ≈0.5× a 256-token pass, the cascade breaks even at ~50% escalation rate, and KV reuse can shave at most ~20% off the second prefill — deciding *before* the LLM (vision-side router) or making the cheap pass a speculative draft are the mitigations that actually change the economics; (d) `pool_anchored` as built is not nested across budgets (self-attention over the joint set + budget-dependent anchor grid), plain `query` is, and `lora_specialize_tok` breaks feature-level nesting for both — all config/architecture facts that gate which items are loopable. Eleven actionable items, ordered; the first three are zero-training analyses on existing eval logs (M3-style oracle gap, router-signal correlation, escalation cost model) that also settle the precondition nothing else survives without: whether the ladder has an accuracy gradient to trade on at all. |
 | 24 | Cluster-wide reboot (all 8 nodes down) interrupted v7-kd7b mid-training and truncated v6-tokrange's eval to 4/8 levels. Cancel v7-kd7b and its eval outright; requeue the missing v6-tokrange levels with the script bug fixed; resize v9-parcel-decorr to fit on A10 (node208) instead of A40 (node205) so node205 stays free; write up the backbone/PARCEL/decorr ablation matrix that doesn't fit locally as a pending-work list for the other ("hipster") cluster. | Done (§15). Found and fixed a real bug in `eval_lmms_level.sh` along the way: `jq`'s availability is inconsistent across compute nodes, so 4 of 8 v6-tokrange eval array tasks silently fell back to a wrong 4-level default and errored out even though `elastic_config.json` was present and correct the whole time — replaced with a `python3`-based parse (env-guaranteed) and a loud failure instead of a silent wrong-grid fallback. v7-kd7b (27299) + its eval (27300) cancelled; v6-tokrange's missing levels (576/512/448/384-token) requeued as job 27375 `--array=4-7`. v9-parcel-decorr requeued as job 27376/27377 with `--gres=gpu:A10:2` (was A40:2) — justified by v8-parcel, the identical architecture minus the decorrelation term, having already completed its full 84.5h run cleanly on node208's A10:2. |
 | 25 | Analyse v6's available eval levels and v8 against the earlier runs and say whether any introduced change actually helped; record the outcome; make **v8 the best working model**; drop rank-nested vision LoRA from all future runs including v9; queue **v10** with vision LoRA fixed at 16 for both stages; re-scope the hipster matrix to the v8 setup with vision LoRA off, stating in that section that v8 is the best-performing config and that vision LoRA is off; rename v6's eval folders correctly and verify the pending evals land in the right ones. | Done (§16). **Yes, one change helped: PARCEL (v8) — the only run with a real budget–accuracy gradient, and the new best model (§16c).** The other two introduced changes lost: rank-nested vision LoRA is a regression on both backbones (§16d, default now False), and the extended 576→16 ladder is a large regression (§16b, retired). Found along the way that §15b's root cause was recorded backwards: *every* task of job 27292 hit the `jq` fallback, so v6's four surviving results were not 256/144/64/16 at all but 576/512/448/384 written under the wrong labels — verified against the measured prefill FLOPs and relabelled (§16a). v9 cancelled and re-scoped onto v8's grid with LoRA off; v10 added; v11 deferred by decision; recipes moved out of submitting-shell env vars into `submit_elastic_run.sh` (+ a `docs/SUBMITTED_RUNS.tsv` job-id→recipe log) in git, after v9's ladder had to be recovered from circumstantial evidence. v9 requeued as 27378/27379 and v10 as 27380/27381, both `--array=0-3`; all 8 nodes were still `down` at submit time, so neither has started. |
+| 45 | Analyze the completed v14 eval; say what the best standing approach is now. | Done (§16q). **v8 remains the best model — v14 loses.** Cleanest isolation in the project (rank ladder DIRECTION only, everything else identical to v8): v14 loses MME/POPE/TextVQA/GQA at every level (256 tok worst: −8.23 TextVQA, −3.77 GQA), wins only SciQA. The asymmetry is the finding — v14's 256-level has 8x MORE rank than v8's and does worse; its 16-level has 8x LESS rank and is within noise of v8. More capacity at the information-rich teacher level does not help and may hurt; v8's original "small budget gets more adapter" convention, inherited unexamined since v4, is now directly confirmed rather than assumed. v14's own elasticity nearly collapses too (TextVQA spread +0.81 vs v8's +8.76, MME spread NEGATIVE) -- nesting alone isn't enough, direction matters. v14 vs v11 at 256 tok shows a non-monotonic story: no adapter (v11) beats a large one (v14) beats a small one (v8) on TextVQA/GQA at the teacher level specifically -- speculative mechanism noted, not measured. SciQA nuance: v14 beats v8 at every level despite IDENTICAL total LoRA rank (120 either way), so SciQA tracks placement, not just amount. `final-parcel` (v8) stands, now with its last unexamined design choice tested directly. |
+| 47 | Smoke-test TinyLlama, SmolLM2, MobileLLaMA with SigLIP under the best (final-parcel/v8) recipe. | Done, all pass (section 22). Re-ran the existing SigLIP unit test first (27458) to check for regressions from three sessions of unrelated engine.py/nested_lora.py changes -- none; all three original fixes (l_enc, no blanket no_grad, scoped pooling-head injection) still hold. Then 6 real steps each of Stage 1 + Stage 2 for all three backbones (27459) on final-parcel's actual flags with only VISION_TOWER swapped to SigLIP -- genuinely new ground, since the one prior SigLIP validation used the now-retired 8-level ladder and never finished as a real run, and MobileLLaMA has never been run through the elastic pipeline at all before this. All 6 stages exit 0, all losses finite, no NaN/Inf anywhere in the log, grad norms shrinking through two single-batch Stage-1 noise spikes rather than diverging. This proves the pipeline runs correctly for all three backbones on this exact recipe; it says nothing about eventual accuracy or whether SigLIP beats CLIP here -- that needs the real runs, not yet queued. Smoke checkpoints (~120GB) deleted after inspection. Added MAX_STEPS to the elastic launchers (previously only on the baseline ones). |
+| 46 | Check the Qwen job results. | It failed (§21a) -- reported as such, not as "still running." Stage 1 completed cleanly; Stage 2 OOM'd at step 16/5197 on an A10 (22.3 GiB) inside `prefix_kl_loss`. Root cause: Qwen's 151936-token vocabulary is 4.7x TinyLlama's, and the KL loss materializes a full unmasked `(B,L,V)` tensor before reducing -- a failure mode no prior backbone's vocabulary ever exercised, and outside what the EOS-masking onboarding check screens for. Fixed by GPU type, not code: resubmitted Stage 2 only (Stage 1's checkpoint reused) on `run_job_finetune_slm.sh`'s standing `gpu:A40:2` default -- 27456/27457. Flagged, did not fix, a real inefficiency in `prefix_kl_loss` (computes the KL over the full sequence before masking to labelled positions) that would help every backbone, not just Qwen -- left alone since it touches loss code shared by every prior comparison in this project, and the GPU swap alone fully explains this failure. |
 | 44 | Queue the Qwen-0.5B experiment with the best config. | Done (§21). `bash submit_elastic_run.sh final-parcel` with `SLM_KEY=qwen0.5b` -- the exact §17c/§18 recipe (PARCEL, nested LoRA, decorr off, self-teacher, 256/144/64/16 grid), no per-backbone changes. Queued as 27447/27448 (`--array=0-3`), waiting on both 2-GPU nodes (v14 + a v8-parcel re-eval). First Qwen run of any kind in this project -- no local v4-equivalent baseline exists, so this is the first row of the Hipster sweep, not an ablation. Onboarding check not re-run: Qwen2.5 was already verified clean 2026-08-18 and no preprocess code has changed since. |
 | 43 | Analyze the completed v13 run: did the long ladder and self-KD from 576 tokens help; what was the config; v8/v11/v14 style? | Done (§16p). **Config is v11-style** (`use_lora=false`, PARCEL, decorr off, self-teacher) placed on v6's 8-level ladder — not v8's or v14's nested-LoRA recipes. **"KD from 576" is self-distillation** (`teacher: "self"`), not external KD (contrast v12); it changes which level is the self-teacher because `kl_teacher_tok_level` is always index 0, which is now 576 instead of 256. **Does the long ladder help? Yes, decisively vs. v6** — every metric, every level, TextVQA +6 to +8 pts, MME +57 to +139 pts — confirming PARCEL rescues most of v6's catastrophic failure, and doing so DESPITE carrying a known LoRA-off handicap (§16m) that runs against v13, so the true PARCEL effect is likely understated here. **Does it beat v8? No** — loses MME/POPE/GQA at every shared level, wins only SciQA (the familiar LoRA-off pattern) and ties TextVQA at 16 tok. v13's own elasticity (both full 576-16 and the short 256-16 sub-range) is flatter than v8's or hipster v11's. At v13@576 — literally the same token count as the dense baseline — it still trails baseline by ~18 TextVQA / 6 GQA points, nearly identical to v13@256, so the extra 320 top-ladder tokens buy almost nothing: a milder recurrence of the token-budget-has-no-effect pattern. Verdict unchanged: `final-parcel` (v8) remains the recipe; the long ladder stays a research question, not a replacement. |
 | 42 | Move the W&B API key out of the tracked scripts into `~/.netrc` or a non-committed env file, on `main`, and push. | Done (§20). The key was inline in **10** tracked `run_job*.sh` files as `#SBATCH --export=ALL,WANDB_API_KEY=…`, so it sat in the repo, in history, and on GitHub. Moved to `~/.netrc` (mode 600, `machine api.wandb.ai`) — wandb's native mechanism, needing no script logic since `$HOME` is shared with the compute nodes; every export line became a plain `--export=ALL`. Verified netrc resolves and that later `#SBATCH` directives (e.g. `--exclusive`) still apply, since SLURM scans through comments. `.gitignore` now blocks `.env`/`*.env`/`.netrc`/`secrets.sh`. **Flagged as NOT fixed by this change: the key remains in git history, on GitHub, and on the `hipster` branch — it must be rotated at wandb.ai, which is the only step that ends the exposure.** |
@@ -1884,6 +1887,112 @@ LoRA on, isolating whether the LoRA-off confound above fully explains the v8 gap
 there is appetite for it, but not before v14 reports.
 
 
+### 16q. v14 results: rank-ladder direction matters, and v8's direction was already the right one
+
+Completed (jobs 27406/27407). Config confirmed: `lora_ranks=[64,32,16,8]` against
+`tok_levels=[256,144,64,16]` — the 256-token (teacher) level gets the **largest**
+adapter (rank 64), the 16-token level the **smallest** (rank 8), the exact reverse of
+v8's `[8,16,32,64]`. Everything else — `resampler_arch=pool_anchored`,
+`anchor_mode=ratio` @0.25, `use_token_decorrelation=false`, `teacher=self`, grid
+`256/144/64/16` — is identical to v8. Stage 1 also confirms the inherent difference
+flagged in §16m: it trained a rank-64 adapter at 256 tokens, and v14's 256-level uses
+all 64 of those columns (v8's 256-level used only the first 8).
+
+**This is now the cleanest isolation in the whole ablation set — one variable, rank
+direction, nothing else differs — and v14 loses.**
+
+| level | MME-P | POPE-acc | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|
+| 256 | 1102.47 | 82.26 | **50.37** | 20.24 | 52.30 |
+| 144 | 1112.56 | 82.18 | **50.72** | 20.02 | 52.22 |
+| 64  | 1119.90 | 81.32 | **51.12** | 20.38 | 52.18 |
+| 16  | 1118.11 | 79.91 | **50.27** | 19.43 | 51.46 |
+
+**v14 vs v8, all four levels:**
+
+| level | MME-P | POPE-acc | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|
+| 256 | −67.78 | −2.07 | +2.23 | **−8.23** | **−3.77** |
+| 144 | −29.62 | −2.05 | +2.63 | −6.32 | −3.08 |
+| 64  | −35.20 | −1.71 | +3.67 | −3.35 | −2.34 |
+| 16  | −5.80 | −0.58 | +3.91 | −0.28 | −1.15 |
+
+v14 loses MME/POPE/TextVQA/GQA at **every** level, worst at 256 tokens — precisely the
+level v14 gave the *most* extra capacity to. It wins SciQA at every level, continuing
+the pattern from §16m/§16l, though with a wrinkle noted below. The 16-token gap is the
+only one small enough to be noise (TextVQA −0.28 against a ~0.6pp stderr); everywhere
+else the gaps are 2–5× stderr.
+
+**The asymmetry is the real finding.** v14's 256-level carries **8× more** LoRA rank
+than v8's (64 vs 8) and still loses badly there (−8.23 TextVQA, −3.77 GQA). v14's
+16-level carries **8× less** rank than v8's (8 vs 64) and is within noise of it. Extra
+capacity at the information-rich, teacher-serving level does not help — the level that
+already has the least to compensate for got the least benefit from more adapter, and
+plausibly grew worse for it. Capacity at the starved level barely matters at all: 8
+columns gets the 16-token level to within 0.3 TextVQA points of what 64 columns
+achieves. **This directly answers the question §16m/16p left open** ("does the
+rank/budget pairing direction matter, or would either ladder work as well once nesting
+is present at all?") — direction matters, and v8's original convention (small budgets
+get more adapter capacity to compensate; large budgets get just enough to specialize
+without perturbing the shared representation) was already correct. v14 was a real test
+of a real competing hypothesis, and the hypothesis lost.
+
+**Elasticity collapses under the reversed ladder — this is the more surprising result.**
+Spread 256→16:
+
+| run | MME-P | POPE-acc | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|
+| v8 | +46.34 | +3.84 | +1.78 | **+8.76** | +3.46 |
+| v11 | +99.95 | +3.86 | +2.72 | **+10.09** | +3.66 |
+| **v14** | **−15.64** | +2.35 | +0.10 | **+0.81** | +0.84 |
+
+v14's MME spread is *negative* — the 16-token level scores higher than 256 tokens — and
+its TextVQA/GQA spread collapses to near the flat v4/v5 baselines this whole
+architecture was built to fix (§project-token-budget-has-no-effect). PARCEL and full
+nested vision LoRA are both present in v14, exactly as in v8, and the elasticity
+gradient that made v8 the best model (§16c) is nearly gone anyway. So the gradient is
+not just "PARCEL + nested LoRA" — it depends on nesting them in the *right direction*.
+Putting the most adapter capacity at the rich/teacher level apparently lets that level
+drift in a way that erodes its edge over the cheap levels, flattening the curve from
+both ends rather than lifting the floor.
+
+**v14 vs v11 (does reversed-nested LoRA still beat no LoRA at all?) — mixed, and the
+256-level result is the interesting part:**
+
+| level | MME-P | POPE-acc | SciQA | TextVQA | GQA |
+|---|---|---|---|---|---|
+| 256 | +15.84 | −1.26 | +0.15 | −1.94 | −1.65 |
+| 144 | −4.20 | −1.31 | +0.35 | +0.74 | −1.37 |
+| 64  | +18.47 | −1.09 | +1.54 | +4.15 | −0.31 |
+| 16  | +131.43 | +0.25 | +2.77 | +7.34 | +1.17 |
+
+At 16 tokens, some adapter (even the "wrong-direction" rank-8 sliver) clearly beats
+none. At 256 tokens, v14 is worse than v11 on POPE/TextVQA/GQA — i.e. **giving the
+teacher level a large adapter is worse than giving it no adapter at all**, not just
+worse than giving it a small one (v8). That makes the 256-level's rank a
+non-monotonic story on its own: v11 (rank 0) < v14 (rank 64) < v8 (rank 8) on
+TextVQA/GQA at that level. Speculative but plausible mechanism, not measured directly:
+whichever level serves as the self-distillation teacher (`kl_teacher_tok_level=0`)
+propagates its own quality to every other level via the KL term, so a heavily-adapted,
+possibly-drifted teacher (v14) does worse than either an unperturbed one (v11) or a
+lightly-touched one (v8, rank 8) — the middle ground v8's convention happens to land on.
+
+**The SciQA nuance.** v14 wins SciQA at every level against v8, despite both carrying
+identical *total* LoRA rank (8+16+32+64 = 64+32+16+8 = 120) — so SciQA's earlier
+"tracks inversely with LoRA capacity" framing (§16m/§16l, a six-run pattern across
+different *amounts* of adapter) needs a footnote: at matched total capacity, it also
+tracks *where* that capacity sits, favouring more rank at the high-budget/teacher level
+over more rank at the low-budget levels. Both framings may be true simultaneously
+(less total capacity helps SciQA; and among fixed-capacity ladders, capacity nearer the
+teacher level helps SciQA) — not disentangled by anything run so far.
+
+**Verdict: v8 remains the best model, and more securely than before.** This was the one
+remaining design choice in v8's recipe that had never been ablated on its own — every
+other axis (resampler, LoRA presence, decorrelation, KD teacher, ladder length) had a
+clean isolation; only the rank-direction convention was inherited from v4 unexamined.
+It has now been tested directly and confirmed. `final-parcel` needs no change.
+
+
 ### 16l. v11 and v12 (hipster) close the ablation set: the final recipe is v8, and it is not close
 
 The hipster cluster returned `elastic-finetune-tinyllama-v11-parcel-nolora`,
@@ -2303,6 +2412,148 @@ sequentially unless Hipster runs many concurrently.
 matrix — rather than silently substituting another size. Override with `QWEN_KEY=`.
 
 All four base models are present in the HF cache; no download is needed.
+
+
+### 21a. Qwen2.5-0.5B's first attempt OOM'd — a large-vocabulary failure mode never exercised before
+
+**No results — the run failed, not "not finished yet."** Stage 1 (job 27447's pretrain
+half) completed cleanly: `elastic-pretrain-qwen0.5b-final-parcel/checkpoint-2180` is a
+real, complete checkpoint. Stage 2 crashed at **step 16 of 5197** on node208 (A10:2,
+22.30 GiB/card):
+
+```
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.85 GiB.
+GPU 0 has a total capacty of 22.30 GiB of which 1.36 GiB is free.
+  File "llava/model/language_model/llava_elastic_mixin.py", line 343, in forward
+    kl = _el.prefix_kl_loss(s_log, t_log, kl_labels)
+  File "llava/model/elastic/losses.py", line 26, in prefix_kl_loss
+    kl = F.kl_div(s, t, reduction="none").sum(-1)  # (B, L)
+```
+
+**Root cause: Qwen2.5-0.5B's vocabulary (151936) is 4.7× TinyLlama's (32000) and
+2.5–4.7× every backbone this loss has ever run against**, and `prefix_kl_loss`
+materializes a full `(B, L, V)` tensor before reducing:
+
+```python
+def prefix_kl_loss(student_logits, teacher_logits, labels=None, T=1.0):
+    s = F.log_softmax(student_logits / T, dim=-1)      # (B, L, V)
+    t = F.softmax(teacher_logits / T, dim=-1)           # (B, L, V)
+    kl = F.kl_div(s, t, reduction="none").sum(-1)       # (B, L, V) intermediate, THEN summed
+```
+
+`reduction="none"` keeps the full per-vocab, per-position elementwise term alive
+(needed for the backward pass through `log_softmax`/`softmax`) before `.sum(-1)`
+collapses it — and this runs over **every sequence position**, not just the
+labelled ones; the `labels != -100` mask is applied only *after* the KL is computed
+(line 27-30), so positions that get masked out (image tokens, system/user turns) still
+paid the full `(B, L, V)` cost. TinyLlama/MobileLLaMA (32000), SmolLM2 (49152) never
+came close to tipping this over on a 24 GB card; Qwen at 151936 did, on step 16.
+
+**This is a genuinely new failure mode, not one the onboarding checklist screens
+for.** `project-backbone-onboarding-checks` validates label-masking correctness (EOS
+supervision) and elastic-key loading — both are about correctness, not memory, and
+both would pass here (the run got 16 steps into real training before dying, well past
+where a masking bug would show). No prior backbone in this project has had a
+vocabulary anywhere near Qwen's, so nothing before this exercised the failure path.
+
+**Fix applied: GPU type, not code.** Resubmitted Stage 2 only (Stage 1's checkpoint is
+reused, not redone — `ELASTIC_RUN_TAG=final-parcel` with `ELASTIC_PRETRAIN_TAG` left
+unset defaults the warm-start to the same tag) on `run_job_finetune_slm.sh`'s own
+default `gpu:A40:2` (46 GiB/card, already this project's standing choice for
+memory-tight Stage-2 runs — its own header cites Phi-3.5 OOM'ing at 41.5/44.67 GiB on
+A40 as precedent for never risking the smaller card on a full finetune). Jobs
+**27456** (train) / **27457** (`--array=0-3`, eval). A40's headroom (~25 GiB free
+where A10 had 1.36 GiB) should comfortably absorb the same peak; this was not
+re-derived from a memory model, it is the standing per-backbone mitigation this project
+already uses instead of touching shared loss code.
+
+**Flagged, not fixed: `prefix_kl_loss` computing the full unmasked `(B,L,V)` term is a
+real inefficiency, worth fixing for every backbone, not just Qwen.** Restricting the
+`log_softmax`/`softmax`/`kl_div` chain to only the labelled (assistant-response)
+positions *before* the vocab-dimension ops — rather than computing over the full
+sequence and masking after — would cut both memory and compute roughly in proportion to
+how much of a sequence is masked out, which for a single-turn VQA example with a long
+visual prefix is most of it. Mathematically equivalent (masking commutes with a
+per-position sum before the final mean), so this is a safe optimization if someone
+wants to make it, but it was **not** applied here: it touches loss code shared by every
+run in this project, and a quick GPU-type change fully explains and fixes this specific
+failure without touching anything that could silently change a number in an already-
+reported comparison. Revisit if a future backbone's vocabulary makes even A40
+insufficient, or if the compute savings become worth it on their own.
+
+## 22. SigLIP + `final-parcel` smoke test: TinyLlama, SmolLM2, MobileLLaMA (decision 47)
+
+Not a full run — a validation pass before committing multi-day jobs to a combination
+that has never actually been exercised on this recipe.
+
+**Why this needed a fresh smoke, not a re-read of §10b/10c.** SigLIP support was fixed
+and smoke-tested once before (job 27326), but that run used the now-retired 8-level
+`576…16` ladder with ranks `2 4 6 8 8 16 32 64` (§16b), never finished as a real
+training run (swapped to CLIP before completion, §13), and only ever touched TinyLlama.
+Nothing had run SigLIP against `final-parcel`'s actual grid (`256/144/64/16`, ranks
+`8 16 32 64`) on any backbone. **MobileLLaMA has never been run through the elastic
+pipeline at all**, SigLIP or CLIP (§15e) — this was its first exposure, full stop.
+
+**Regression check first.** Re-ran `jobs/test_anchor_mode_and_siglip.sh` (job 27458)
+before touching real data, since `engine.py`/`nested_lora.py`/`config.py` have all
+changed since §10b for unrelated reasons (v14's rank-order work, the KD-teacher
+registry). All three original SigLIP fixes still hold: `l_enc` threading, no blanket
+`no_grad`, and the pooling-head injection scoped to `vision_model.encoder` (66/72 LoRA
+wrappers received nonzero gradient, mean norm 883.9) — `ALL_TESTS_PASSED`, no
+regression from three sessions' worth of unrelated changes.
+
+**Smoke test** (`jobs/smoke_siglip_final_parcel.sh`, job 27459): `final-parcel`'s exact
+flags (`resampler_arch=pool_anchored`, `anchor_mode=ratio` @0.25, nested vision LoRA
+`8 16 32 64`, `use_token_decorrelation=False`, `teacher=self`, grid `256/144/64/16`)
+with only `VISION_TOWER=google/siglip-base-patch16-384` changed, 6 real steps each of
+Stage 1 then Stage 2, for tinyllama → smollm2 → mobilellama in sequence. Run on
+node208's real 2×A10 (ZeRO-2 sharding as a real run would use, not the single-GPU
+offload workaround §10c needed the first time — node208 was free).
+
+**Result: all six stages pass.**
+
+| backbone | stage | exit | loss trajectory (6 steps) | grad_norm trajectory |
+|---|---|---|---|---|
+| tinyllama | 1 | 0 | 9.34 → 9.31 → 7.66 → 7.45 → 5.76 → 6.13 | 120 → 118 → 31 → 17 → 10 → 12 |
+| tinyllama | 2 | 0 | 3.55 → 3.82 → 2.37 → 1.65 → 1.61 → **1.56** | 51 → 49 → 33 → 10 → 8 → 7 |
+| smollm2 | 1 | 0 | 6.73 → 6.73 → 13.59 → 10.97 → 9.82 → 9.23 | 54 → 59 → 43 → 13 → 7 → **4** |
+| smollm2 | 2 | 0 | 9.01 → 8.96 → 8.72 → 7.79 → 8.03 → 7.82 | 43 → 39 → 38 → 25 → 19 → 18 |
+| mobilellama | 1 | 0 | 8.09 → 7.94 → 6.27 → 12.33 → 11.24 → 10.43 | 154 → 135 → 17 → 42 → 19 → 26 |
+| mobilellama | 2 | 0 | 9.96 → 10.32 → 7.21 → 4.73 → 3.84 → **3.42** | 100 → 111 → 96 → 57 → 34 → 24 |
+
+All finite (`grep -icE "\bnan\b|\binf\b"` over the full log: **0**). Two mid-run
+spikes (smollm2 Stage 1 step 3: 6.73→13.59; mobilellama Stage 1 step 4: 6.27→12.33) are
+single noisy CE batches at Stage 1's LR 1e-3 with a frozen backbone and no averaging to
+speak of at n=6 steps — not divergence: grad norms keep shrinking through both spikes
+rather than blowing up, and both Stage 2 tinyllama/mobilellama runs show a clean
+monotonic loss decline. Not evidence either way about eventual accuracy — the point of
+a smoke test is "does it run," not "will it be good."
+
+**What this validates, concretely:** SigLIP's `l_enc` threading and gradient flow
+under real (not synthetic) images and text, on three different vision-feature widths
+consumed by three different LLM hidden sizes (TinyLlama 2048, SmolLM2 2048 at a
+different tokenizer/vocab, MobileLLaMA 2048 with its own conv template) — the
+resampler, PARCEL's anchor/query split, nested vision LoRA, and self-distillation KL
+all execute correctly together on this exact recipe, for the first time, on all three
+backbones.
+
+**Not validated by a 6-step smoke, and why that's the right scope here:** final loss
+values, convergence, or anything about whether SigLIP beats or loses to CLIP on this
+recipe — that needs the real multi-day runs this smoke test exists to de-risk before
+committing to. Smoke checkpoints (`*-smoketest-siglip`, ~120 GB across six dirs) were
+deleted after inspection — scratch validation artifacts, not experiment results, per
+the checkpoint cleanup policy.
+
+**Code change:** `MAX_STEPS` wired into `pretrain_elastic_slm.sh` /
+`finetune_elastic_slm.sh` (mirrors the same knob already in the M3/MQT baseline
+launchers, §19) — a no-op when unset, so no existing recipe or submitted job is
+affected.
+
+**Not yet decided:** whether to queue the real SigLIP + `final-parcel` runs for these
+three backbones. This section validates that they *would* run; it does not argue they
+should be prioritized ahead of the Hipster CLIP sweep (§17c/§18) already in flight.
+
+
 
 ### 17d. `--lora_type` and `--nest_version`
 

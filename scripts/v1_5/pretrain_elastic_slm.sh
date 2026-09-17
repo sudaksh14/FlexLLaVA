@@ -186,6 +186,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --bf16 True \
     --output_dir "${OUTPUT_DIR}" \
     --num_train_epochs 1 \
+    ${MAX_STEPS:+--max_steps ${MAX_STEPS}} \
     --per_device_train_batch_size 16 \
     --per_device_eval_batch_size 4 \
     --gradient_accumulation_steps ${GRAD_ACCUM} \
