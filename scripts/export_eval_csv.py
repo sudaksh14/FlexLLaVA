@@ -53,6 +53,10 @@ MODELS = {
     # v13 = v11's recipe (no LoRA) on v6's 8-level 576-16 ladder. Rescues most
     # of v6's failure but still trails v8 -- section 16p.
     "elastic-finetune-tinyllama-v13-parcel-longladder": ("FlexTinyLLaVA-1.1B (v13, PARCEL long-ladder, no LoRA)", "TinyLlama-1.1B-Chat-v1.0", "elastic (PARCEL pool-anchored)"),
+    # v14 = v8 with the LoRA rank ladder REVERSED (rank follows budget, not
+    # inversely). Loses to v8 on the cleanest single-variable isolation in the
+    # project -- section 16q. Rank DIRECTION, not just nesting, is load-bearing.
+    "elastic-finetune-tinyllama-v14-parcel-asclora": ("FlexTinyLLaVA-1.1B (v14, PARCEL rank-ascending)", "TinyLlama-1.1B-Chat-v1.0", "elastic (PARCEL pool-anchored)"),
 }
 SUPERSEDED = ["llava-elastic-finetune", "llava-elastic-finetune-v3",
               "elastic-finetune-tinyllama", "elastic-finetune-tinyllama-v3",
