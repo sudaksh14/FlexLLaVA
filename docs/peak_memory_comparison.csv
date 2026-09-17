@@ -1,10 +1,11 @@
 model,family,backbone,status,params_b,peak_mem_gb,note,seconds
 llava_v1_5_7b,baseline,Vicuna-7B,ok,7.063,14.873,576 tokens (no elastic engine),83.8
+llava_v1_5_7b_4bit,baseline,Vicuna-7B,ok,3.814,5.609,"576 tokens, weight-only NF4 4-bit (double quant, fp16 compute); vision tower stays fp16. Measured node206/A40 alongside a same-job fp16 reference of 15.209 GB -- pair with THAT, not with the 14.873 GB A10 row (+2.3% card/allocator difference). params_b is the packed uint8 element count, NOT a parameter count: bnb stores two 4-bit weights per byte.",13.1
 tinyllama_v4_16,FlexLLaVA,TinyLlama-1.1B,ok,1.442,2.939,16 tokens (tok_level=3),7.9
 tinyllama_v4_256,FlexLLaVA,TinyLlama-1.1B,ok,1.442,2.965,256 tokens (tok_level=0),13.4
 tinyllama_v6_576,FlexLLaVA,TinyLlama-1.1B,ok,1.471,3.097,"576 tokens (tok_level=0, v6-tokrange checkpoint-3500 -- mid-training, valid for memory shape only, not an accuracy claim)",17.6
 smollm2_v4_16,FlexLLaVA,SmolLM2-1.7B,ok,2.054,4.162,16 tokens (tok_level=3),8.2
 smollm2_v4_256,FlexLLaVA,SmolLM2-1.7B,ok,2.054,4.271,256 tokens (tok_level=0),11.4
 tinyllava_phi2,original,Phi-2-2.7B,ok,3.217,13.019,"576 tokens (SigLIP-so400m, no compression) -- tinyllava/TinyLLaVA-Phi-2-SigLIP-3.1B",97.1
-mobilevlm_v2,original,MobileLLaMA-1.4B,FAIL,,,"NOT MEASURED: ModuleNotFoundError: No module named 'timm.layers' -- vendored MobileVLM code needs a newer timm than the shared matryoshka-mm training env has; not upgraded to avoid destabilizing concurrently-running training jobs (27282/27291/27303/27299). mtgv/MobileVLM_V2-1.7B.",11.1
+mobilevlm_v2,original,MobileLLaMA-1.4B,FAIL,,,NOT MEASURED: ModuleNotFoundError: No module named 'timm.layers' -- vendored MobileVLM code needs a newer timm than the shared matryoshka-mm training env has; not upgraded to avoid destabilizing concurrently-running training jobs (27282/27291/27303/27299). mtgv/MobileVLM_V2-1.7B.,11.1
 smolvlm,original,SmolLM2-1.7B,FAIL,,,"NOT MEASURED: ValueError, transformers in the shared env does not recognize SmolVLM's processing class -- same reason as mobilevlm_v2, not fixed in-place. HuggingFaceTB/SmolVLM-Instruct.",3.0

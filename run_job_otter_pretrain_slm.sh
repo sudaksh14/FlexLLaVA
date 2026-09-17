@@ -12,7 +12,13 @@
 #SBATCH --gres=gpu:A10:2
 #SBATCH --cpus-per-task=32
 #SBATCH --output=./jobs/otterpre_%A.out
-#SBATCH --export=ALL,WANDB_API_KEY=dfcd2574507b9ebe69ca13ab6f6925d864e82ee0
+#SBATCH --export=ALL
+# W&B credentials are NOT in this file. They live in ~/.netrc (mode 600,
+# machine api.wandb.ai), which wandb reads natively on the compute node --
+# $HOME is shared with the login node, so nothing needs exporting. Set it up
+# once with `wandb login`, or write the three-line netrc stanza by hand.
+# Previously this line carried the key inline, which put it in every commit
+# and on GitHub; see docs/EXPERIMENT_JOURNAL.md section 20.
 #SBATCH --exclusive
 
 # Stage 1 (feature alignment) on the Otter-style data pipeline.

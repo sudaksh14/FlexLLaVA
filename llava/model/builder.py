@@ -71,7 +71,13 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     if load_8bit:
         kwargs['load_in_8bit'] = True
     elif load_4bit:
-        kwargs['load_in_4bit'] = True
+        # NOTE: do NOT also set kwargs['load_in_4bit']. Upstream LLaVA set both it
+        # and quantization_config, which older transformers tolerated; 4.44.2
+        # (this env) raises "You can't pass `load_in_4bit` or `load_in_8bit` as a
+        # kwarg when passing `quantization_config` argument at the same time."
+        # BitsAndBytesConfig(load_in_4bit=True, ...) already carries the flag, so
+        # the separate kwarg was always redundant. Every 4-bit caller in this repo
+        # (this probe, serve/cli.py, serve/model_worker.py) was dead until now.
         kwargs['quantization_config'] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.float16,
