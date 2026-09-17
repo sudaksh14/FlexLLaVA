@@ -124,26 +124,20 @@ case "$RUN" in
     export VISION_TOWER="google/siglip-so400m-patch14-384"
     export ANCHOR_MODE=fixed
     export ANCHOR_ROUTING="256:81,144:9,64:9,16:1"
-    # so400m is 428M params, 1.41x CLIP-L -- SmolLM2 (1.7B, the largest LLM run
-    # here) OOM'd on a single 24GB A10 in Stage 2 backward (DAS-6 job 27461,
-    # 22.28/22.30GB used) and needed A40 (46GB) to clear; confirmed a capacity
-    # ceiling, not a bug, by passing on a single UNSHARDED A40 (job 27463), a
-    # HARDER memory test than the real 2-GPU config. capacity's L4 is the same
-    # 24GB class as the A10 that OOM'd, so the same refusal v12 already applies
-    # for a different reason (frozen-7B VRAM) applies here for SmolLM2 only --
-    # TinyLlama and MobileLLaMA (smaller LLMs) cleared so400m fine on that same
-    # A10 and are not restricted.
-    if [ "$SLM_KEY" = "smollm2" ]; then
-        DEFAULT_PARTITION="performance"
-        if [ -n "$PARTITION_ARG" ] && [ "$PARTITION_ARG" != "performance" ]; then
-            echo "ERROR: v8-siglip-so400m-parcel + smollm2 needs 'performance' (RTX" >&2
-            echo "       6000 Ada, 48GB) -- so400m's larger tower OOM'd a 24GB A10 in" >&2
-            echo "       Stage 2 for this exact backbone (DAS-6 job 27461); 'capacity'" >&2
-            echo "       (L4, 24GB) is the same VRAM class and expected to repeat it." >&2
-            echo "       Requested partition '$PARTITION_ARG' refused." >&2
-            exit 1
-        fi
-    fi
+    # so400m is 428M params, 1.41x CLIP-L. No partition restriction for
+    # SmolLM2 here -- capacity's 4x L4 per job is what actually applies, and
+    # was never tested against this combination. What WAS tested, on DAS-6:
+    # SmolLM2+so400m OOM'd in Stage 2 backward with ZeRO-2 sharding across only
+    # 2x A10 (job 27461, 22.28/22.30GB used, failing on a 22MB marginal
+    # allocation -- essentially at the wire, not wildly over budget), and
+    # passed on a single UNSHARDED A40 (job 27463, 46GB). Neither config used
+    # 4-way sharding. capacity's 4 GPUs is double the sharding of the config
+    # that failed, and ZeRO-2 shards optimizer state + gradients (though not
+    # weights or per-GPU activations, which don't shrink with more ranks) --
+    # plausible this clears the thin margin above, not confirmed at 4-GPU
+    # scale. Removed the refusal on request (more GPUs available on hipster's
+    # capacity than were tested); if it OOMs again, that is new information
+    # (4-way still insufficient), not a repeat of the known 2-way failure.
     ;;
   v12-parcel-kd7b)
     # v11 + a frozen external LLaVA-1.5-7B KD teacher.
