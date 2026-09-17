@@ -84,6 +84,53 @@ def pool_anchors(image_features: torch.Tensor, n_anchor: int) -> torch.Tensor:
     return x.permute(0, 2, 3, 1).reshape(N, tgt * tgt, C)
 
 
+def _factor_grid(n: int) -> tuple:
+    """Factor n into (rows, cols), rows <= cols, rows*cols == n, rows as close
+    to sqrt(n) as possible without exceeding it.
+
+    Deterministic for any n >= 1: start at floor(sqrt(n)) and walk down to the
+    largest divisor. A prime n degenerates to a 1 x n strip rather than
+    raising -- still a valid, deterministic grid, just a maximally rectangular
+    one. Used only by the adaptive-pooling fork (pool_anchors_adaptive); the
+    ratio/fixed anchor paths do not call this.
+    """
+    r = int(n ** 0.5)
+    while r > 1 and n % r != 0:
+        r -= 1
+    return r, n // r
+
+
+def pool_anchors_adaptive(image_features: torch.Tensor, n_anchor: int) -> torch.Tensor:
+    """Adaptive-pooling FORK of pool_anchors(): exactly `n_anchor` grid-aligned
+    anchor tokens for ANY n_anchor in [1, P], not just the perfect-square,
+    evenly-dividing counts pool_anchors() requires.
+
+    (N, P, C) -> (N, n_anchor, C). Strategy: factor n_anchor into (rows, cols)
+    as close to square as possible (see _factor_grid), then
+    F.adaptive_avg_pool2d the square patch grid down to that rows x cols grid.
+    Unlike pool_anchors()'s exact-stride avg_pool2d, adaptive pooling does not
+    require rows/cols to evenly divide the patch grid side -- pooling windows
+    can differ by at most one row/column in size (PyTorch's adaptive-pool
+    semantics), which is the tradeoff that buys arbitrary anchor counts.
+
+    This is a separate function, not a branch inside pool_anchors(), so
+    anchor_mode in ("ratio", "fixed") always calls pool_anchors() and is
+    unaffected by this existing.
+    """
+    N, P, C = image_features.shape
+    side = int(round(P ** 0.5))
+    if side * side != P:
+        raise ValueError(f"pool_anchors_adaptive needs a square patch grid, got P={P}")
+    if not (1 <= n_anchor <= P):
+        raise ValueError(f"n_anchor={n_anchor} out of range [1, {P}]")
+    if n_anchor == P:
+        return image_features
+    rows, cols = _factor_grid(n_anchor)
+    x = image_features.view(N, side, side, C).permute(0, 3, 1, 2)   # (N, C, side, side)
+    x = F.adaptive_avg_pool2d(x, output_size=(rows, cols))          # (N, C, rows, cols)
+    return x.permute(0, 2, 3, 1).reshape(N, rows * cols, C)
+
+
 def _interp_pos_embed(pos: torch.Tensor, tgt_len: int) -> torch.Tensor:
     """Bicubic-resample a square positional grid to another square grid.
 
@@ -112,7 +159,8 @@ class NestedQueryResampler(nn.Module):
                  use_pos_embed: bool = False, pos_embed_type: str = "learned",
                  query_selection: str = "prefix",
                  resampler_arch: str = "query", anchor_routing=None,
-                 anchor_mode: str = "ratio", anchor_ratio: float = 0.25):
+                 anchor_mode: str = "ratio", anchor_ratio: float = 0.25,
+                 num_anchors_adaptive: int = None):
         """
         Args:
             dim:           hidden dim (must match ViT output dim, e.g. 1024 for CLIP-L)
@@ -190,10 +238,16 @@ class NestedQueryResampler(nn.Module):
         if resampler_arch not in ("query", "pool_anchored"):
             raise ValueError(f"resampler_arch={resampler_arch!r}; expected "
                              f"'query' or 'pool_anchored'")
-        if anchor_mode not in ("ratio", "fixed"):
-            raise ValueError(f"anchor_mode={anchor_mode!r}; expected 'ratio' or 'fixed'")
+        if anchor_mode not in ("ratio", "fixed", "adaptive"):
+            raise ValueError(f"anchor_mode={anchor_mode!r}; expected 'ratio', 'fixed', "
+                             f"or 'adaptive'")
         self.anchor_mode = anchor_mode
         self.anchor_ratio = anchor_ratio
+        # "adaptive" is a FORK (pool_anchors_adaptive, see resampler.py module
+        # docstring above it): arbitrary anchor counts via F.adaptive_avg_pool2d,
+        # not required to be perfect squares or divide the patch grid evenly --
+        # unlike anchor_routing's meaning in "ratio"/"fixed" mode, checked below.
+        self.num_anchors_adaptive = num_anchors_adaptive
         if resampler_arch == "pool_anchored":
             if anchor_mode == "fixed" and not self.anchor_routing:
                 raise ValueError(
@@ -201,16 +255,30 @@ class NestedQueryResampler(nn.Module):
                     "anchor_routing (it IS the routing table, not an override) -- "
                     "'fixed' means a literal step function over budgets you declare, "
                     "there is nothing to fall back to without one.")
+            if anchor_mode == "adaptive" and not self.anchor_routing and num_anchors_adaptive is None:
+                raise ValueError(
+                    "resampler_arch='pool_anchored' with anchor_mode='adaptive' requires "
+                    "either anchor_routing (a budget->n_anchor table) or "
+                    "num_anchors_adaptive (a single count reused for every budget) -- "
+                    "there is nothing to fall back to without one.")
             valid = valid_anchor_counts(num_patches)
             if self.anchor_routing:
                 for b, npch in sorted(self.anchor_routing.items()):
-                    if npch not in valid:
+                    if anchor_mode != "adaptive" and npch not in valid:
                         raise ValueError(
                             f"anchor_routing[{b}]={npch} is not reachable by integer "
                             f"pooling of a {num_patches}-patch grid; valid: {valid}")
+                    if npch < 1 or npch > num_patches:
+                        raise ValueError(
+                            f"anchor_routing[{b}]={npch} out of range [1, {num_patches}]")
                     if npch > b:
                         raise ValueError(
                             f"anchor_routing[{b}]={npch} exceeds the budget {b}")
+            if anchor_mode == "adaptive" and num_anchors_adaptive is not None:
+                if not (1 <= num_anchors_adaptive <= num_patches):
+                    raise ValueError(
+                        f"num_anchors_adaptive={num_anchors_adaptive} out of range "
+                        f"[1, {num_patches}]")
             # Query <-> Pool self-attention: the step that makes queries "pool-aware"
             # so they spend themselves on what pooling DISCARDS rather than
             # re-encoding layout the anchors already carry. PARCEL's ablation:
@@ -288,7 +356,12 @@ class NestedQueryResampler(nn.Module):
         the largest declared budget <= this one, or the smallest declared
         entry's value if this budget is below all of them.
 
-        Both modes always leave at least one query token, so the pool_anchored
+        "adaptive" mode (FORK, see pool_anchors_adaptive): same step-function
+        lookup as "fixed" when anchor_routing is given (values need not be
+        perfect squares here), else num_anchors_adaptive reused for every
+        budget. ratio/fixed are UNCHANGED by this branch's existence.
+
+        All modes always leave at least one query token, so the pool_anchored
         branch never degenerates into plain M3 average pooling.
         """
         valid = valid_anchor_counts(num_patches)
@@ -299,6 +372,16 @@ class NestedQueryResampler(nn.Module):
             else:
                 below = [b for b in table if b <= budget]
                 n_p = table[max(below)] if below else table[min(table)]
+        elif self.anchor_mode == "adaptive":
+            if self.anchor_routing:
+                table = self.anchor_routing
+                if budget in table:
+                    n_p = table[budget]
+                else:
+                    below = [b for b in table if b <= budget]
+                    n_p = table[max(below)] if below else table[min(table)]
+            else:
+                n_p = self.num_anchors_adaptive
         else:
             if self.anchor_routing and budget in self.anchor_routing:
                 n_p = self.anchor_routing[budget]
@@ -306,7 +389,11 @@ class NestedQueryResampler(nn.Module):
                 target = max(1, round(budget * self.anchor_ratio))
                 n_p = max((v for v in valid if v <= target), default=1)
         # Never consume the whole budget: keep >=1 query so the "division of
-        # labour" this architecture exists for actually happens.
+        # labour" this architecture exists for actually happens. "adaptive"
+        # counts are arbitrary integers (not necessarily in `valid`), so they
+        # are clamped directly instead of snapped to the nearest valid square.
+        if self.anchor_mode == "adaptive":
+            return min(max(n_p, 1), max(budget - 1, 1))
         while n_p >= budget and n_p > 1:
             n_p = max((v for v in valid if v < n_p), default=1)
         return min(n_p, max(budget - 1, 1))
@@ -430,7 +517,13 @@ class NestedQueryResampler(nn.Module):
                 f"budget {n_tok} needs {n_q} query tokens but the bank holds "
                 f"{self.num_queries}; raise num_query_tokens (= tok_levels[0])")
 
-        anchors = pool_anchors(image_features, n_p)          # (N, n_p, C)
+        # Single fork point: "adaptive" is the only mode that ever calls
+        # pool_anchors_adaptive; "ratio"/"fixed" always call pool_anchors(),
+        # exactly as before this fork existed.
+        if self.anchor_mode == "adaptive":
+            anchors = pool_anchors_adaptive(image_features, n_p)  # (N, n_p, C)
+        else:
+            anchors = pool_anchors(image_features, n_p)           # (N, n_p, C)
 
         if n_q <= 0:                                          # pure-anchor budget
             return self.out_ln(anchors)

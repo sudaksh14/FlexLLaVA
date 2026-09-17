@@ -67,7 +67,8 @@ def _get_argv_value(key: str) -> str:
 
 
 def _write_run_manifest(elastic_args, tok_levels, lora_ranks,
-                        nest_version, lora_type) -> None:
+                        nest_version, lora_type,
+                        resampler_arch=None, anchor_mode=None) -> None:
     """Write run_manifest.json into output_dir: everything needed to reproduce
     this run, in one file, at launch time.
 
@@ -131,9 +132,11 @@ def _write_run_manifest(elastic_args, tok_levels, lora_ranks,
         "vision_lora":      {"enabled": elastic_args.vision_lora_enable,
                              "specialize_tok": elastic_args.vision_lora_specialize_tok,
                              "ranks": list(lora_ranks)},
-        "resampler":        {"arch": elastic_args.resampler_arch,
-                             "anchor_mode": elastic_args.anchor_mode,
+        "resampler":        {"arch": resampler_arch or elastic_args.resampler_arch,
+                             "anchor_mode": anchor_mode or elastic_args.anchor_mode,
                              "anchor_ratio": elastic_args.anchor_ratio,
+                             "num_anchors_adaptive": elastic_args.num_anchors,
+                             "pooling_mode": elastic_args.pooling_mode,
                              "query_selection": elastic_args.query_selection},
         "n_sample_students": elastic_args.n_sample_students,
         "use_nested_dropout": elastic_args.use_nested_dropout,
@@ -170,7 +173,8 @@ def _write_run_manifest(elastic_args, tok_levels, lora_ranks,
         print(f"[elastic] could not write run_manifest.json: {e}", flush=True)
 
 
-def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
+def _print_config_banner(elastic_args, tok_levels, lora_ranks,
+                         resampler_arch=None, anchor_mode=None) -> None:
     llm = _get_argv_value("--model_name_or_path")
     ve = _get_argv_value("--vision_tower")
     teacher_tok = tok_levels[0]
@@ -210,6 +214,21 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         vt_lora_str = "disabled (frozen, unspecialized vision tower)"
     qsel = elastic_args.query_selection
     qsel_str = qsel if qsel == "prefix" else f"{qsel}  (NON-DEFAULT, untested)"
+    resampler_arch = resampler_arch or elastic_args.resampler_arch
+    anchor_mode = anchor_mode or elastic_args.anchor_mode
+    if resampler_arch == "pool_anchored":
+        if anchor_mode == "adaptive":
+            n_a = (f"anchor_routing={_parse_anchor_routing(elastic_args.anchor_routing)}"
+                   if elastic_args.anchor_routing else
+                   f"num_anchors={elastic_args.num_anchors}")
+            resampler_str = f"pool_anchored  (anchor_mode=adaptive [FORK], {n_a})"
+        elif anchor_mode == "fixed":
+            resampler_str = f"pool_anchored  (anchor_mode=fixed, anchor_routing={_parse_anchor_routing(elastic_args.anchor_routing)})"
+        else:
+            resampler_str = f"pool_anchored  (anchor_mode=ratio, anchor_ratio={elastic_args.anchor_ratio})"
+    else:
+        resampler_str = "query  (plain learned query bank)"
+    pooling_mode_str = elastic_args.pooling_mode or "(unset -- using --resampler_arch/--anchor_mode directly)"
     sep = "=" * 64
     print(
         f"\n{sep}\n"
@@ -223,6 +242,8 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks) -> None:
         f"  LLM LoRA       : {llm_lora_str}\n"
         f"  Vision LoRA    : {vt_lora_str}\n"
         f"  Query select   : {qsel_str}\n"
+        f"  Pooling mode   : {pooling_mode_str}\n"
+        f"  Resampler      : {resampler_str}\n"
         f"  KD loss        : {kd_str}\n"
         f"  CORAL loss     : {coral_str}\n"
         f"  Decorr loss    : {decorr_str}\n"
@@ -252,6 +273,28 @@ def _parse_anchor_routing(spec):
             raise ValueError(f"--anchor_routing entry {pair!r} is not 'BUDGET:NANCHOR'")
         routing[int(budget)] = int(n_anchor)
     return routing or None
+
+
+#: --pooling_mode -> (resampler_arch, anchor_mode). "parcel"/"ratio" both name
+#: PARCEL's existing, only-ever-run anchor split; "fixed" is PARCEL's own
+#: step-function design; "adaptive" is the new fork (pool_anchors_adaptive).
+_POOLING_MODE_MAP = {
+    "parcel":   ("pool_anchored", "ratio"),
+    "ratio":    ("pool_anchored", "ratio"),
+    "fixed":    ("pool_anchored", "fixed"),
+    "adaptive": ("pool_anchored", "adaptive"),
+}
+
+
+def _resolve_resampler_arch_and_anchor_mode(elastic_args):
+    """--pooling_mode, when given, is the sole source of truth for both
+    resampler_arch and anchor_mode (so a run can't claim a pooling_mode that
+    disagrees with what it actually used). Default None is a strict no-op:
+    --resampler_arch/--anchor_mode (or their own defaults) pass through
+    unchanged, which is what keeps every pre-existing command unaffected."""
+    if elastic_args.pooling_mode is None:
+        return elastic_args.resampler_arch, elastic_args.anchor_mode
+    return _POOLING_MODE_MAP[elastic_args.pooling_mode]
 
 
 def _parse_elastic_args():
@@ -410,6 +453,35 @@ def _parse_elastic_args():
                    help="Weight on the token-decorrelation loss term (default 0.01, "
                         "matching coral_weight's scale). Ignored if "
                         "--use_token_decorrelation is False.")
+    p.add_argument("--pooling_mode", choices=("parcel", "fixed", "ratio", "adaptive"),
+                   default=None,
+                   help="Convenience selector layered over --resampler_arch/"
+                        "--anchor_mode, added for the adaptive-anchor FORK (see "
+                        "pool_anchors_adaptive in llava/model/elastic/resampler.py). "
+                        "'parcel' and 'ratio' both resolve to resampler_arch="
+                        "pool_anchored, anchor_mode=ratio (PARCEL's existing, "
+                        "only-ever-run anchor split -- kept as two names because "
+                        "callers use both terms for the same thing). 'fixed' -> "
+                        "resampler_arch=pool_anchored, anchor_mode=fixed (existing, "
+                        "requires --anchor_routing). 'adaptive' -> resampler_arch="
+                        "pool_anchored, anchor_mode=adaptive, the NEW fork "
+                        "supporting arbitrary (non-perfect-square) anchor counts -- "
+                        "requires --anchor_routing or --num_anchors. DEFAULT None: "
+                        "leaves --resampler_arch/--anchor_mode exactly as given (or "
+                        "at their own defaults) -- omitting --pooling_mode changes "
+                        "NOTHING, so every existing command is unaffected. When "
+                        "given, it OVERRIDES --resampler_arch/--anchor_mode.")
+    p.add_argument("--num_anchors", type=int, default=None, metavar="INT",
+                   help="Single anchor count reused for EVERY budget under "
+                        "anchor_mode=adaptive (--pooling_mode adaptive or "
+                        "--anchor_mode adaptive directly), used when "
+                        "--anchor_routing is not given. Must be in [1, num_patches] "
+                        "and, per-budget, less than that budget -- validated at "
+                        "resampler construction / forward. Unlike --anchor_routing's "
+                        "perfect-square requirement in 'fixed'/'ratio' mode, "
+                        "adaptive mode accepts ANY positive integer (e.g. 10, 13, "
+                        "20) -- see pool_anchors_adaptive() in "
+                        "llava/model/elastic/resampler.py.")
     elastic_args, remaining = p.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining  # hide elastic flags from HfArgumentParser
     return elastic_args
@@ -460,10 +532,13 @@ def main():
             f"--tok_levels length ({len(tok_levels)})"
         )
 
+    resampler_arch, anchor_mode = _resolve_resampler_arch_and_anchor_mode(elastic_args)
+
     if os.environ.get("LOCAL_RANK", "0") == "0":
-        _print_config_banner(elastic_args, tok_levels, lora_ranks)
+        _print_config_banner(elastic_args, tok_levels, lora_ranks,
+                             resampler_arch, anchor_mode)
         _write_run_manifest(elastic_args, tok_levels, lora_ranks,
-                            nest_version, lora_type)
+                            nest_version, lora_type, resampler_arch, anchor_mode)
 
     m3train.ELASTIC_CONFIG = ElasticConfig(
         token_reduction="nested_query",
@@ -486,10 +561,11 @@ def main():
         use_pos_embed=elastic_args.use_pos_embed,
         pos_embed_type=elastic_args.pos_embed_type,
         query_selection=elastic_args.query_selection,
-        resampler_arch=elastic_args.resampler_arch,
-        anchor_mode=elastic_args.anchor_mode,
+        resampler_arch=resampler_arch,
+        anchor_mode=anchor_mode,
         anchor_ratio=elastic_args.anchor_ratio,
         anchor_routing=_parse_anchor_routing(elastic_args.anchor_routing),
+        num_anchors_adaptive=elastic_args.num_anchors,
         use_nested_dropout=elastic_args.use_nested_dropout,
         projector_out_norm=elastic_args.projector_out_norm,
         use_token_decorrelation=elastic_args.use_token_decorrelation,
