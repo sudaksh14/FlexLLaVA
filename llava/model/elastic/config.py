@@ -125,6 +125,15 @@ class ElasticConfig:
     #       anchor_routing (e.g. below 64 -> 16 anchors, 64..256 -> 64
     #       anchors), constant within each declared band rather than scaling
     #       continuously. Requires anchor_routing to be set.
+    #   "adaptive" -- FORK, not part of PARCEL: arbitrary (non-perfect-square)
+    #       anchor counts via F.adaptive_avg_pool2d (resampler.py's
+    #       pool_anchors_adaptive), so counts like 10/13/20 that "ratio"/
+    #       "fixed" cannot reach (they require exact-stride pooling of a
+    #       square grid) are usable. Same anchor_routing step-function lookup
+    #       as "fixed" when anchor_routing is set; otherwise falls back to
+    #       num_anchors_adaptive, a single count reused for every budget.
+    #       Requires one of the two. Added alongside "ratio"/"fixed", which
+    #       are unchanged by its existence.
     anchor_mode: str = "ratio"
     # Fraction of the budget spent on anchors in "ratio" mode. 0.25 is the
     # value v8-parcel used at every declared level; not yet tested at other
@@ -140,6 +149,11 @@ class ElasticConfig:
     # ~5 points at the top of the range, which is what "fixed" mode's step
     # function is for testing deliberately, not what "ratio" mode does.
     anchor_routing: Optional[dict] = None
+    # anchor_mode="adaptive" ONLY: single anchor count reused for every
+    # budget, used when anchor_routing is not set. Unlike anchor_routing's
+    # values in "ratio"/"fixed" mode, this need not be a perfect square or
+    # divide the patch grid evenly -- see pool_anchors_adaptive (resampler.py).
+    num_anchors_adaptive: Optional[int] = None
     # How the resampler picks its n_tok output tokens out of the query bank.
     # DEFAULT "prefix": the original, only-ever-run behaviour (queries[:n_tok],
     # content-agnostic). See NestedQueryResampler's docstring (resampler.py)

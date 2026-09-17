@@ -118,7 +118,8 @@ class ElasticEngine:
                 resampler_arch=getattr(cfg, "resampler_arch", "query"),
                 anchor_routing=getattr(cfg, "anchor_routing", None),
                 anchor_mode=getattr(cfg, "anchor_mode", "ratio"),
-                anchor_ratio=getattr(cfg, "anchor_ratio", 0.25))
+                anchor_ratio=getattr(cfg, "anchor_ratio", 0.25),
+                num_anchors_adaptive=getattr(cfg, "num_anchors_adaptive", None))
         # Projector stays full-width (no nesting): width is not an elasticity axis.
         self.projector = NestedProjector(vision_dim, llm_dim, widths=None,
                                          out_norm=getattr(cfg, "projector_out_norm", False))

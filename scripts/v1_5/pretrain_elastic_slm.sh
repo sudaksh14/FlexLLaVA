@@ -161,6 +161,8 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --anchor_routing "${ANCHOR_ROUTING:-}" \
     --anchor_mode "${ANCHOR_MODE:-ratio}" \
     --anchor_ratio "${ANCHOR_RATIO:-0.25}" \
+    ${POOLING_MODE:+--pooling_mode ${POOLING_MODE}} \
+    ${NUM_ANCHORS:+--num_anchors ${NUM_ANCHORS}} \
     --use_token_decorrelation "${USE_TOKEN_DECORRELATION:-False}" \
     --decorr_weight "${DECORR_WEIGHT:-0.01}" \
     --prefix_kl_weight 0.1 \
