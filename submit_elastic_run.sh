@@ -299,8 +299,50 @@ case "$RUN" in
     export ANCHOR_ROUTING="256:81,144:9,64:9,16:1"
     DEFAULT_GRES="gpu:A40:2"
     ;;
+  final-parcel-576ctrl)
+    # Single-level control: final-parcel's EXACT architecture (PARCEL,
+    # anchor_mode=ratio@0.25, nested vision LoRA on/specialized, decorr off,
+    # self-teacher, CLIP-L/14-336) run at ONLY 576 tokens -- no elasticity
+    # ladder. tok_levels/lora_ranks are single-element lists, so
+    # engine.grid() = [0], students_all = [] (the sole level IS the teacher
+    # level -- verified in llava_elastic_mixin.py's forward()), meaning
+    # exactly ONE forward per step, not two: this is NOT v13-parcel-longladder
+    # (8-level 576->16 ladder, vision LoRA OFF, §16j-16p) run at one point: it
+    # answers a different, narrower question -- "does final-parcel's
+    # architecture reach native-resolution parity" -- with no ladder overhead
+    # and no LoRA-off confound.
+    #
+    # Anchor split at budget=576, anchor_ratio=0.25: target=144, which IS a
+    # valid reachable anchor count on CLIP-L's 24x24 grid (divisors of 24 give
+    # {1,4,9,16,36,64,144,576}) -- n_anchors_for(576,576)=144 anchors + 432
+    # queries exactly, no ratio-mode snap-down loss (unlike so400m's grid).
+    # num_queries = tok_levels[0] = 576, so 432 <= 576 is satisfied trivially.
+    #
+    # No existing checkpoint can warm-start this: the only prior
+    # STAGE1_TOK_LEVEL=576 checkpoint (v13-parcel-longladder's Stage 1,
+    # elastic-pretrain-tinyllama-v13-parcel-longladder) has use_lora=False in
+    # its own elastic_config.json -- no vision LoRA weights exist to
+    # warm-start Stage 2's rank-64 adapter from. Needs a fresh Stage 1
+    # pretrain (this recipe includes one; run it, don't try to reuse v13's).
+    #
+    # GRES pinned to A10:2 (node208 is the only node with that exact
+    # type+count -- node205 is A40:2) per request to run this on node208
+    # specifically. Smoke-tested first (jobs/smoke_final_parcel_576ctrl.sh)
+    # to check for OOM at 576 tokens on A10's 24GB before the real multi-day
+    # run -- see docs/EXPERIMENT_JOURNAL.md for the result.
+    export ELASTIC_RUN_TAG=final-parcel-576ctrl
+    export TOK_LEVELS="576"
+    export LORA_RANKS="64"
+    export STAGE1_TOK_LEVEL=576
+    export STAGE1_LORA_RANK=64
+    export VISION_LORA_ENABLE=True
+    export VISION_LORA_SPECIALIZE_TOK=True
+    export USE_TOKEN_DECORRELATION=False
+    export TEACHER=self
+    DEFAULT_GRES="gpu:A10:2"
+    ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl}" >&2
     exit 1
     ;;
 esac

@@ -176,8 +176,8 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --model_name_or_path "${MODEL_PATH}" \
     --cache_dir /var/scratch/skalra/.cache/huggingface/hub \
     --version "${CONV_VERSION}" \
-    --data_path /var/scratch/skalra/flexllava/data/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json \
-    --image_folder /var/scratch/skalra/flexllava/data/LLaVA-Pretrain \
+    --data_path "${DATA_ROOT:-/var/scratch/skalra/flexllava/data}/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json" \
+    --image_folder "${DATA_ROOT:-/var/scratch/skalra/flexllava/data}/LLaVA-Pretrain" \
     --vision_tower "${VISION_TOWER:-openai/clip-vit-large-patch14-336}" \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \

@@ -6,7 +6,8 @@
 #   SUBMIT=1 ONLY=m3  bash run_baselines_4tok.sh
 #   SUBMIT=1 MAX_STEPS=500 bash run_baselines_4tok.sh    # truncate for a smoke run
 #
-# Hipster overrides: GRES (default gpu:2), NUM_GPUS (default 2).
+# Overrides: GRES (default gpu:2), NUM_GPUS (default 2), NODELIST (default
+# unset -- SLURM picks whichever GRES-matching node frees up first).
 #
 # ---------------------------------------------------------------------------
 # WHAT EACH BASELINE IS
@@ -48,6 +49,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 GRES="${GRES:-gpu:2}"
+NODELIST="${NODELIST:-}"
 SUBMIT="${SUBMIT:-}"
 ONLY="${ONLY:-}"
 TAG="${BASELINE_RUN_TAG:-4tok}"
@@ -68,11 +70,12 @@ sub() {  # name stage1_cmd stage2_cmd ckpt evalarray
     echo "    ckpt  : $ck"
     [ -z "$SUBMIT" ] && return 0
     local j1 j2 je
-    j1=$(sbatch --parsable --gres="$GRES" --export=ALL,${PASS_ENV},BASELINE_RUN_TAG=${TAG} \
+    j1=$(sbatch --parsable --gres="$GRES" ${NODELIST:+--nodelist="$NODELIST"} \
+         --export=ALL,${PASS_ENV},BASELINE_RUN_TAG=${TAG} \
          --wrap="module load cuda12.1/toolkit/12.1; eval \"\$(conda shell.bash hook)\"; conda activate matryoshka-mm; export HF_HOME=/var/scratch/skalra/.cache/huggingface; cd /home/skalra/FlexLLaVA; $s1" \
          --job-name="${name}_s1" --output="./jobs/${name}_s1_%A.out" \
          --nodes=1 --ntasks-per-node=2 --cpus-per-task=32 --exclusive -t 100:00:00)
-    j2=$(sbatch --parsable --dependency=afterok:$j1 --gres="$GRES" \
+    j2=$(sbatch --parsable --dependency=afterok:$j1 --gres="$GRES" ${NODELIST:+--nodelist="$NODELIST"} \
          --export=ALL,${PASS_ENV},BASELINE_RUN_TAG=${TAG} \
          --wrap="module load cuda12.1/toolkit/12.1; eval \"\$(conda shell.bash hook)\"; conda activate matryoshka-mm; export HF_HOME=/var/scratch/skalra/.cache/huggingface; cd /home/skalra/FlexLLaVA; $s2" \
          --job-name="${name}_s2" --output="./jobs/${name}_s2_%A.out" \

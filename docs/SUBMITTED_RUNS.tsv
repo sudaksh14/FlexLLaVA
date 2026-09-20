@@ -6,3 +6,5 @@ submitted_utc	recipe	slm_key	train_job	eval_job	tok_levels	lora_ranks	resampler	
 2026-09-13T12:21:43Z	v14-parcel-asclora	tinyllama	27406	27407	256 144 64 16	64 32 16 8	pool_anchored	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-v14-parcel-asclora
 2026-09-15T22:18:41Z	final-parcel	qwen0.5b	27447	27448	256 144 64 16	8 16 32 64	pool_anchored	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-qwen0.5b-final-parcel
 2026-09-17T08:31:03Z	final-parcel-resub-a40	qwen0.5b	27456	27457	256 144 64 16	8 16 32 64	pool_anchored	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-qwen0.5b-final-parcel
+2026-09-18T16:17:03Z	final-parcel-576ctrl	tinyllama	27480	27481	576	64	pool_anchored	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-final-parcel-576ctrl
+2026-09-19T14:08:45Z	mqt-4tok-4tok	tinyllama	27487	27488	4 tokens	baseline	mqt-4tok	-	-	-	/var/scratch/skalra/flexllava/checkpoints/mqt-finetune-tinyllama-4tok
