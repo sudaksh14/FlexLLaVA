@@ -23,6 +23,7 @@ Every decision below is the user's; the "result" column is what actually happene
 
 | # | Decision | Result |
 |---|---|---|
+| 48 | Analyze and record the `final-parcel-576ctrl` eval (single-level PARCEL control at native 576 tokens, no ladder). | Done (§23). **576ctrl loses to `final-parcel`'s own compressed 256-token level on 6 of 7 metrics** (TextVQA −7.3, MME-P −57.2, GQA −3.5; only SciQA favors 576ctrl), and loses badly to the plain dense 576-token baseline everywhere (TextVQA −19.8, MME-P −135.3). With no elasticity training signal at all (one level, nothing to self-distill from), PARCEL's anchor+query architecture underperforms a plain projector even at full uncompressed resolution — looks like a real architectural tax from `pool_anchored`, not only a compression artifact. Sharpens §16p's v13@576 result (which had an 8-level-ladder + vision-LoRA-off confound) by removing both. Incidentally also answered the local-SSD-vs-NFS throughput question: `STAGE_DATA_LOCAL` staging was ~3.3% *slower* than NFS at this scale (GPU-compute-bound workload, not I/O-bound) — stays off by default. |
 | 1 | Build an Otter-inspired data pipeline as a **strictly parallel** addition — verification gate first, then telemetry, then mixture/packing, then throughput. Do not touch the working pipeline. | Built `llava/data_otter/` + `train_otter.py` + `otter_trainer.py`. Zero modified tracked files throughout — verified repeatedly with `git status`. Pipeline worked as designed. |
 | 2 | Run TinyLlama pretrain + eval on the new pipeline; check A10 fit. | Stage 1 fit A10 comfortably (8,622 MiB of 23,028 MiB peak). Run completed → **otter1**. |
 | 3 | Re-run corrected as **otter2** on A10s with `--otter_source_grouped_batches` ON, then chain FT + eval. | Completed. Stage 1 loss 2.3402 (vs v4's 2.26 — close). Stage 2 lost to v4 on eval. |
@@ -3114,3 +3115,72 @@ cross-model agreement with TinyLlama/SmolLM2/Phi-2/Phi-3.5 on the fixed 64-sampl
 No `preprocess_*` code has changed since — `--auto_prefix_len`/`preprocess_mpt` are
 untouched by anything in §16-§20 — so re-running the checker would be re-confirming the
 same fact, not de-risking a real unknown.
+
+## 23. `final-parcel-576ctrl`: PARCEL at native 576 resolution loses to its own 256-token level (decision 48)
+
+**What this is.** A single-level control: `final-parcel`'s exact architecture
+(`resampler_arch=pool_anchored`, `anchor_mode=ratio` @0.25, nested vision LoRA, CLIP-L/336)
+run at `tok_levels=[576]` only — no ladder, no KD/prefix-KL signal (nothing to distill
+from with one level), `lora_ranks=[64]`. Isolates a question v13 (§16p) could only answer
+with a ladder-length confound attached: does PARCEL's anchor+query architecture, given its
+*full, uncompressed* budget, actually reach dense-baseline parity? Queued as jobs
+27480 (Stage 1+2, pinned to node208 via `--nodelist`) / 27481 (eval array, `--array=0`),
+using `STAGE_DATA_LOCAL=true` (data staged to node-local NVMe `/tmp` — measured no
+throughput benefit over NFS at this token count, see the Stage-1 runtime comparison
+below; workload is GPU-compute-bound, not I/O-bound, at 576 tokens). Checkpoint:
+`elastic-finetune-tinyllama-final-parcel-576ctrl`.
+
+**Stage 1 runtime, incidentally also the local-SSD-vs-NFS measurement asked for
+separately:** 35,624s (9h54m), 15.67 samples/s, local `/tmp` staging. The closest
+NFS-based reference at the same 576-token/TinyLlama/2180-step/batch config is v13's own
+Stage 1 (job 27393, vision LoRA *off*): 34,499s (9h35m), 16.18 samples/s. Local SSD came
+out ~3.3% *slower*, though vision LoRA (on here, off there) confounds part of that gap.
+Either way: no measurable speedup from local staging at this scale — `STAGE_DATA_LOCAL`
+stays **off by default** going forward (only `run_job_slm.sh` gates it, opt-in).
+
+**Full eval (576 tokens, default 5-task set):**
+
+| Metric | 576ctrl |
+|---|---|
+| MME-Perception | 1113.05 |
+| MME-Cognition | 201.79 |
+| POPE-acc / F1 | 81.82 / 80.27 |
+| SciQA-img | 50.72 |
+| TextVQA | 21.20 |
+| GQA | 52.57 |
+
+**576ctrl loses to `final-parcel`'s own COMPRESSED 256-token level on 6 of 7 metrics:**
+
+| Metric | 576ctrl | v8-parcel @256 | Δ (576ctrl − 256) |
+|---|---|---|---|
+| MME-P | 1113.05 | 1170.25 | **−57.2** |
+| MME-C | 201.79 | 219.64 | **−17.9** |
+| POPE-acc | 81.82 | 84.33 | **−2.5** |
+| SciQA | 50.72 | 48.14 | **+2.6** (only metric 576ctrl wins) |
+| TextVQA | 21.20 | 28.47 | **−7.3** |
+| GQA | 52.57 | 56.07 | **−3.5** |
+
+**And it loses badly to the plain dense baseline (`baseline-tinyllama-576tok`, mlp2x_gelu,
+no PARCEL, same 576 tokens, no compression at all):**
+
+| Metric | 576ctrl | native 576-dense | Δ |
+|---|---|---|---|
+| MME-P | 1113.05 | 1248.32 | **−135.3** |
+| MME-C | 201.79 | 232.5 | **−30.7** |
+| POPE-acc | 81.82 | 84.89 | **−3.1** |
+| SciQA | 50.72 | 57.36 | **−6.6** |
+| TextVQA | 21.20 | 41.00 | **−19.8** |
+| GQA | 52.57 | 58.30 | **−5.7** |
+
+**Verdict: this looks like a real architectural tax from `pool_anchored` itself, not (only)
+a compression artifact.** With no elasticity training pressure at all (one level, no
+KD/prefix-KL target), the anchor+query hybrid is worse than a plain full-resolution
+projector even when given every token the dense baseline gets — TextVQA is the starkest
+at −19.8. This sharpens §16p's v13@576 finding (which was "almost identical to v13@256,
+buys almost nothing over 256" but was confounded by an 8-level ladder and vision-LoRA-off):
+removing the ladder and turning vision LoRA on doesn't fix it, and losing to its OWN
+256-token level (not just to baseline) is new — v13 was never compared against a
+same-recipe compressed level this directly. Does not change the standing recipe
+(`final-parcel` stays 256/144/64/16); recorded because it's evidence PARCEL's anchor
+mechanism has an inherent cost independent of the compression story, worth flagging if
+the paper claims PARCEL is "free" at full resolution.

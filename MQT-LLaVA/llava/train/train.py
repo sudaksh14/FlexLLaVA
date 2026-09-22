@@ -16,6 +16,7 @@
 
 import os
 import copy
+import random
 from dataclasses import dataclass, field
 import json
 import logging
@@ -740,6 +741,22 @@ class LazySupervisedDataset(Dataset):
         return image
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        # Some datasets (e.g. ocr_vqa) ship with a handful of missing/corrupt
+        # image files (confirmed pre-existing gap, not new corruption -- see
+        # our own llava/train/train.py's identical guard, hit by the same
+        # file 2026-09-08 in job 27282). Fall back to a different random
+        # sample instead of letting one bad sample kill a multi-hour run --
+        # MQT's vendored copy lacked this; job 27488 crashed on it at 24%
+        # through Stage 2 (5h28m in) 2026-09-20.
+        for _ in range(10):
+            try:
+                return self._get_item(i)
+            except (FileNotFoundError, OSError) as e:
+                rank0_print(f"[warn] skipping sample {i} ({self.list_data_dict[i].get('image')}): {e}")
+                i = random.randint(0, len(self.list_data_dict) - 1)
+        raise RuntimeError("Too many consecutive unreadable samples")
+
+    def _get_item(self, i) -> Dict[str, torch.Tensor]:
         sources = self.list_data_dict[i]
         if isinstance(i, int):
             sources = [sources]
