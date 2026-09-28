@@ -1101,8 +1101,11 @@ class LazySupervisedDataset(Dataset):
         if 'image' in self.list_data_dict[i]:
             data_dict['image'] = image
         elif self.data_args.is_multimodal:
-            # image does not exist in the data, but the model is multimodal
-            crop_size = self.data_args.image_processor.crop_size
+            # image does not exist in the data, but the model is multimodal.
+            # CLIPImageProcessor exposes crop_size; SiglipImageProcessor has no
+            # crop step and exposes size instead ({'height','width'}, same shape).
+            image_processor = self.data_args.image_processor
+            crop_size = getattr(image_processor, 'crop_size', None) or image_processor.size
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
         return data_dict
 

@@ -423,12 +423,17 @@ def _parse_elastic_args():
                         "deterministic average-pooled spatial grid, the rest are "
                         "queries made pool-aware by self-attention before they "
                         "cross-attend to the patches. See docs/EXPERIMENT_JOURNAL.md.")
-    p.add_argument("--anchor_mode", choices=("ratio", "fixed"), default="ratio",
+    p.add_argument("--anchor_mode", choices=("ratio", "fixed", "adaptive"), default="ratio",
                    help="'ratio' (default): anchor count is always --anchor_ratio of "
                         "whatever budget is active, computed for any budget. 'fixed': "
                         "--anchor_routing IS the routing table, a step function over "
                         "the budgets you declare (PARCEL's own literal design) -- "
-                        "requires --anchor_routing.")
+                        "requires --anchor_routing. 'adaptive': arbitrary (non-"
+                        "perfect-square) anchor counts via F.adaptive_avg_pool2d "
+                        "(pool_anchors_adaptive in resampler.py) -- requires "
+                        "--anchor_routing or --num_anchors. Equivalent to setting "
+                        "--pooling_mode adaptive, but settable directly without going "
+                        "through the --pooling_mode convenience selector.")
     p.add_argument("--anchor_ratio", type=float, default=0.25,
                    help="Fraction of the budget spent on anchors in --anchor_mode "
                         "ratio (default 0.25). Ignored in 'fixed' mode.")
