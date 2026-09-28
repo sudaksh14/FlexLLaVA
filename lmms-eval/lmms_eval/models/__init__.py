@@ -3,6 +3,7 @@ import os
 AVAILABLE_MODELS = {
     "llava": "Llava",
     "llava_elastic": "LlavaElastic",
+    "llava_mqt": "LlavaMQT",
     "llava_hf": "LlavaHf",
     "llava_sglang": "LlavaSglang",
     "qwen_vl": "Qwen_VL",
