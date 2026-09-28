@@ -3,7 +3,7 @@
 #SBATCH -t 48:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:A10:1
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --output=./jobs/eval_baseline_%A.out
 
@@ -66,11 +66,6 @@ OUTDIR="${LOG_ROOT}/${MODEL_TAG}/${LABEL}"
 # answers get a random option -- see eval_lmms_level.sh for the full rationale).
 TASKS="${TASKS:-mme,pope,scienceqa_img,textvqa_val,gqa}"
 
-# 7B in fp16 is ~14GB of weights on a 24GB A10, so this runs a smaller batch
-# than the 1.1B elastic evals (which use 4). Batch size affects speed only,
-# never the scores.
-BATCH_SIZE="${BATCH_SIZE:-2}"
-
 module load cuda12.6/toolkit/12.6
 eval "$(conda shell.bash hook)"
 conda activate matryoshka-mm
@@ -83,6 +78,23 @@ cd /home/skalra/FlexLLaVA
 echo "Job started: $(date)"
 echo "Node: $(hostname)"
 nvidia-smi | head -12
+
+# Same as eval_lmms_level.sh: --gres=gpu:1 takes whichever GPU type SLURM
+# gives us, so pick the batch size at runtime instead of hardcoding one GPU's
+# VRAM budget. 7B in fp16 is ~14GB of weights -- these defaults are
+# conservative for that; a smaller checkpoint (e.g. the 1.1B M3 baseline) can
+# raise it via BATCH_SIZE=... without editing the script. Batch size affects
+# speed only, never the scores.
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+if echo "$GPU_NAME" | grep -q "A40"; then
+    BATCH_SIZE="${BATCH_SIZE:-4}"
+elif echo "$GPU_NAME" | grep -q "A10"; then
+    BATCH_SIZE="${BATCH_SIZE:-2}"
+else
+    BATCH_SIZE="${BATCH_SIZE:-1}"
+fi
+echo "GPU: $GPU_NAME  →  batch_size=${BATCH_SIZE}"
+
 echo "Model:  $MODEL_PATH   (non-elastic, native 576 visual tokens)"
 echo "Tag:    $MODEL_TAG   conv_template=$CONV_TEMPLATE"
 echo "Tasks:  $TASKS"

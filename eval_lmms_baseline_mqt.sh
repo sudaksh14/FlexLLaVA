@@ -3,7 +3,7 @@
 #SBATCH -t 48:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:A10:1
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --output=./jobs/eval_mqt_%A.out
 
@@ -31,7 +31,6 @@ LABEL="${NUM_VISUAL_TOKENS}tok"
 # backbones -- VQAv2's 214k questions run several hours longer than the rest
 # combined).
 TASKS="${TASKS:-mme,pope,scienceqa_img,textvqa_val,gqa}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
 
 LOG_ROOT=/var/scratch/skalra/flexllava/eval_logs
 OUTDIR="${LOG_ROOT}/${MODEL_TAG}/${LABEL}"
@@ -62,6 +61,19 @@ if [ "$_resolved" != "/home/skalra/FlexLLaVA/MQT-LLaVA/llava" ]; then
     exit 1
 fi
 echo "[mqt] llava package -> ${_resolved} (MQT's, verified)"
+
+# Same as eval_lmms_level.sh: --gres=gpu:1 takes whichever GPU type SLURM
+# gives us, so pick the batch size at runtime instead of hardcoding one GPU's
+# VRAM budget. Batch size affects speed only, never the scores.
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+if echo "$GPU_NAME" | grep -q "A40"; then
+    BATCH_SIZE="${BATCH_SIZE:-4}"
+elif echo "$GPU_NAME" | grep -q "A10"; then
+    BATCH_SIZE="${BATCH_SIZE:-2}"
+else
+    BATCH_SIZE="${BATCH_SIZE:-1}"
+fi
+echo "GPU: $GPU_NAME  →  batch_size=${BATCH_SIZE}"
 
 echo "Model:  $MODEL_PATH"
 echo "Tag:    $MODEL_TAG   num_visual_tokens=$NUM_VISUAL_TOKENS"
