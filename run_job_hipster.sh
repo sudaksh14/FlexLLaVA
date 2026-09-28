@@ -107,6 +107,19 @@ mapfile -t SHARDS < <(timeout 30 ssh -o BatchMode=yes "$DAS6_HOST" \
     "find '$DAS6_DATA/LLaVA-Pretrain' -mindepth 1 -maxdepth 1 -type d -printf '%f\n'" | sort)
 echo "${#SHARDS[@]} LLaVA-Pretrain shard dirs found."
 
+# Pretrain and Finetune streamed as two SEQUENTIAL phases, not one combined
+# burst -- fixed 2026-09-19 after real failures (jobs 359765/359767/359965,
+# all three real DAS-6-streaming attempts of this recipe): launching all 15
+# connections at once (8 pretrain-shard chunks + 1 json scp + 5 finetune-dir
+# tars + 1 json scp) hit `kex_exchange_identification: read: Connection reset
+# by peer` on some fraction of them -- DAS-6's sshd very likely rate-limiting
+# concurrent unauthenticated connections (MaxStartups-style throttling). The
+# already-proven sibling scripts (run_job_pretrain_only_hipster.sh at 9
+# concurrent, run_job_hipster_finetune_only_das6.sh at 6) never combined into
+# one burst because they run as separate SLURM jobs on a dependency chain.
+# Serializing here caps concurrency at 9 during phase 1 and 6 during phase 2,
+# matching those already-proven levels, at the cost of running the two phases
+# back to back instead of overlapped.
 PIDS=()
 for i in $(seq 0 $(( N_PARALLEL - 1 ))); do
     CHUNK=()
@@ -120,10 +133,21 @@ scp -o BatchMode=yes -q "$DAS6_HOST:$DAS6_DATA/LLaVA-Pretrain/blip_laion_cc_sbu_
     "$LOCAL_SSD/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json" &
 PIDS+=($!)
 
+FAIL=0
+for pid in "${PIDS[@]}"; do
+    wait "$pid" || FAIL=1
+done
+if [ "$FAIL" -ne 0 ]; then
+    echo "ERROR: one or more DAS-6 LLaVA-Pretrain transfer streams failed -- see output above." >&2
+    exit 1
+fi
+echo "LLaVA-Pretrain transfer done."; date
+
 # One tar-over-ssh pipe per top-level LLaVA-Finetune dir, run in parallel --
 # same principle as the pretrain shard chunking above: a single sequential
 # stream per dataset avoids per-file SSH/protocol overhead. No compression
 # (tar cf, not czf): payload is JPEGs, already compressed.
+PIDS=()
 for d in coco gqa ocr_vqa textvqa vg; do
     ssh -o BatchMode=yes "$DAS6_HOST" "tar -cf - -C $DAS6_DATA/LLaVA-Finetune $d" \
         | tar -xf - -C "$LOCAL_SSD/LLaVA-Finetune" &
@@ -138,10 +162,9 @@ for pid in "${PIDS[@]}"; do
     wait "$pid" || FAIL=1
 done
 if [ "$FAIL" -ne 0 ]; then
-    echo "ERROR: one or more DAS-6 transfer streams failed -- see output above." >&2
+    echo "ERROR: one or more DAS-6 LLaVA-Finetune transfer streams failed -- see output above." >&2
     exit 1
 fi
-
 echo "Transfer done."; date
 du -sh "$LOCAL_SSD"/*
 export LOCAL_SSD
