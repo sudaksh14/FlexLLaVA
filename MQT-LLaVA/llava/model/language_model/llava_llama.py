@@ -72,6 +72,18 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         image_sizes: Optional[List[List[int]]] = None,
         num_visual_tokens: Optional[int] = None,
         return_dict: Optional[bool] = None,
+        # transformers>=4.4x's GenerationMixin._sample() always includes
+        # cache_position in the kwargs it forwards to the model call (added
+        # for the newer Cache-object KV mechanism); this class was written
+        # against transformers 4.36.2 and had no such parameter, so
+        # generate() failed outright with "forward() got an unexpected
+        # keyword argument 'cache_position'" the moment it was invoked under
+        # this repo's transformers 4.44.2 -- prepare_inputs_for_generation()
+        # below already threads it through correctly via **kwargs, forward()
+        # just wasn't declared to accept it. Passed straight through to
+        # LlamaForCausalLM.forward(), which does support it in this
+        # transformers version.
+        cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         if inputs_embeds is None:
@@ -103,7 +115,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict
+            return_dict=return_dict,
+            cache_position=cache_position,
         )
 
     @torch.no_grad()

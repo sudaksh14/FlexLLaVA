@@ -160,6 +160,21 @@ class LlavaMetaForCausalLM(ABC):
         H = W = int(H_W ** 0.5)
         reshaped_tensor = image_features.view(N, H, W, C)
         reshaped_tensor = reshaped_tensor.permute(0, 3, 1, 2)
+        # config.matryoshka_vis_token_scale is always stored as a list
+        # (train.py's list_of_integers(...) at save time, even for a
+        # single-scale finetune); every other call site unwraps it to a
+        # scalar per-scale before use (e.g. llava_elastic_mixin.py's
+        # `for scale in self.config.matryoshka_vis_token_scale`). This
+        # no-engine fallback branch is only reachable for a pure (non-elastic)
+        # M3 checkpoint and never did that unwrap, so it crashed on every
+        # single call with "unsupported operand type(s) for /: 'int' and
+        # 'list'" the first time a pure M3 baseline was run through eval.
+        if isinstance(matryoshka_vis_token_scale, (list, tuple)):
+            assert len(matryoshka_vis_token_scale) == 1, (
+                f"matryoshka_vis_token_process expects a single scale at "
+                f"inference time, got {matryoshka_vis_token_scale}"
+            )
+            matryoshka_vis_token_scale = matryoshka_vis_token_scale[0]
         pool_size = stride = int( np.sqrt(H_W / matryoshka_vis_token_scale) )
         pooled_tensor = F.avg_pool2d(reshaped_tensor, kernel_size=pool_size, stride=stride)
         image_features = pooled_tensor.permute(0, 2, 3, 1)
