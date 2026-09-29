@@ -188,6 +188,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --pos_embed_type "${POS_EMBED_TYPE:-learned}" \
     --use_nested_dropout False \
     --n_sample_students 1 \
+    --single_budget_per_step "${SINGLE_BUDGET_PER_STEP:-False}" \
     --vision_lora_enable "${VISION_LORA_ENABLE:-False}" \
     --vision_lora_specialize_tok "${VISION_LORA_SPECIALIZE_TOK:-True}" \
     --lora_enable False \

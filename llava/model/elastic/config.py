@@ -191,6 +191,11 @@ class ElasticConfig:
     decorr_weight: float = 0.01
     kl_teacher_tok_level: int = 0        # index into tok_levels (highest = full)
     n_sample_students: int = 0           # 0 = full grid; k>0 = teacher + k random students per step
+    # True: each step trains exactly ONE budget drawn uniformly from the whole ladder, with
+    # no always-present reference level (PARCEL's nested-dropout training). Overrides
+    # n_sample_students. Meaningful only with prefix-KL / CORAL off, since both need the
+    # reference level's outputs.
+    single_budget_per_step: bool = False
     log_adapter_every: int = 0           # >0: log LoRA adapter divergence every N steps
 
     def __post_init__(self):
