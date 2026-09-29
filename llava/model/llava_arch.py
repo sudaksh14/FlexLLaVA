@@ -175,8 +175,19 @@ class LlavaMetaForCausalLM(ABC):
                 f"inference time, got {matryoshka_vis_token_scale}"
             )
             matryoshka_vis_token_scale = matryoshka_vis_token_scale[0]
-        pool_size = stride = int( np.sqrt(H_W / matryoshka_vis_token_scale) )
-        pooled_tensor = F.avg_pool2d(reshaped_tensor, kernel_size=pool_size, stride=stride)
+        # M3's integer-kernel pooling only yields exactly `scale` tokens when
+        # 24/sqrt(scale) is an integer. For scale=256 the kernel is
+        # int(sqrt(576/256)) = int(1.5) = 1, i.e. NO pooling and 576 tokens, so a
+        # "256-token" M3 level silently used the full grid. For perfect-square
+        # scales whose side does not divide the grid, pool adaptively to the exact
+        # g x g grid instead; every other scale keeps the original kernel path
+        # bit-for-bit (4, 16, 64, 144, 576 are unchanged).
+        g = int(round(float(np.sqrt(matryoshka_vis_token_scale))))
+        if g * g == matryoshka_vis_token_scale and H % g != 0:
+            pooled_tensor = F.adaptive_avg_pool2d(reshaped_tensor, (g, g))
+        else:
+            pool_size = stride = int( np.sqrt(H_W / matryoshka_vis_token_scale) )
+            pooled_tensor = F.avg_pool2d(reshaped_tensor, kernel_size=pool_size, stride=stride)
         image_features = pooled_tensor.permute(0, 2, 3, 1)
         image_features = image_features.reshape(N, -1, C)
         # print('image_features.shape :', image_features.shape)

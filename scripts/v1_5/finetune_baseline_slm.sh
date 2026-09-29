@@ -114,6 +114,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_mem.py \
     --tf32 True \
     --model_max_length 2048 \
     --gradient_checkpointing True \
+    --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
     --dataloader_num_workers 8 \
     --lazy_preprocess True \
     --report_to wandb \

@@ -341,11 +341,115 @@ case "$RUN" in
     export TEACHER=self
     DEFAULT_GRES="gpu:A10:2"
     ;;
+  v4-query)
+    # LM-scale rank study (paper, Sec. III-B): a PURELY LEARNED nested query
+    # resampler with learned positional embeddings and no anchors, no vision
+    # LoRA, self-KD -- the v4 recipe -- to be run at several LM scales with
+    # everything else fixed (SLM_KEY=qwen0.5b|qwen1.5b|qwen3b: one family, one
+    # tokenizer, one pretraining corpus, so LM size is the only thing that moves).
+    # Then measure the projected-token rank at n=256 with debug/measure_token_rank.py.
+    # The v4/v5 checkpoints behind the paper's 50.8% row no longer exist, so this
+    # is a fresh set of runs, not a re-measurement.
+    # A40:2: Qwen's 151936-token vocab makes prefix_kl_loss's (B,L,V) tensor OOM on
+    # a 24 GB A10 (memory: project-large-vocab-kd-oom).
+    export ELASTIC_RUN_TAG=v4-query
+    export RESAMPLER_ARCH=query
+    export USE_POS_EMBED=True
+    export VISION_LORA_ENABLE=False
+    export LORA_RANKS="8 16 32 64"     # inert while vision LoRA is off
+    export STAGE1_LORA_RANK=64
+    export USE_TOKEN_DECORRELATION=False
+    export TEACHER=self
+    DEFAULT_GRES="gpu:A40:2"
+    ;;
+  v4-query-256)
+    # Rank estimate at a SINGLE budget: the v4-query recipe (purely learned query bank,
+    # learned positional embeddings, no anchors, no vision LoRA) trained at n=256 only, for
+    # MobileLLaMA and SmolLM2 (SLM_KEY=mobilellama|smollm2). One level means one forward per
+    # step and no prefix-nesting training; the queries are only ever exercised at 256, which
+    # is the budget the rank is measured at. Rank of the projected tokens is then measured
+    # with debug/measure_token_rank.py (queued by queue_followup_pipeline.sh).
+    # len(lora_ranks) must equal len(tok_levels) even though vision LoRA is off.
+    export ELASTIC_RUN_TAG=v4-query-256
+    export TOK_LEVELS="256"
+    export LORA_RANKS="64"
+    export STAGE1_TOK_LEVEL=256
+    export STAGE1_LORA_RANK=64
+    export RESAMPLER_ARCH=query
+    export USE_POS_EMBED=True
+    export VISION_LORA_ENABLE=False
+    export USE_TOKEN_DECORRELATION=False
+    export TEACHER=self
+    ;;
+  v4-query-nopos)
+    # Same as v4-query but WITHOUT positional embeddings: the condition the paper
+    # currently only cites (4.7% rank, checkpoint deleted). TinyLlama by default.
+    export ELASTIC_RUN_TAG=v4-query-nopos
+    export RESAMPLER_ARCH=query
+    export USE_POS_EMBED=False
+    export VISION_LORA_ENABLE=False
+    export LORA_RANKS="8 16 32 64"
+    export STAGE1_LORA_RANK=64
+    export USE_TOKEN_DECORRELATION=False
+    export TEACHER=self
+    ;;
+  v4-query-sincos)
+    # Same as v4-query but with MQT-LLaVA's FROZEN 2-D sine-cosine positional grid
+    # (pos_embed_type=sincos2d) instead of learned embeddings. Job 26568 recorded a
+    # 7B model WITHOUT positional embeddings collapsing to ~21/256 (TinyLlama ~12/256),
+    # and MQT-7B (which uses sincos2d) reaches 217/256, so the paper's 50.8% (learned,
+    # TinyLlama) vs 84.9% (MQT-7B) gap may reflect positional-embedding design rather
+    # than LM scale. This isolates that: LM held at TinyLlama, only the positions change.
+    export ELASTIC_RUN_TAG=v4-query-sincos
+    export RESAMPLER_ARCH=query
+    export USE_POS_EMBED=True
+    export POS_EMBED_TYPE=sincos2d
+    export VISION_LORA_ENABLE=False
+    export LORA_RANKS="8 16 32 64"
+    export STAGE1_LORA_RANK=64
+    export USE_TOKEN_DECORRELATION=False
+    export TEACHER=self
+    ;;
+  parcel-faithful)
+    # PARCEL as published (arXiv 2605.30126): budget-aware routing that gives
+    # 16 anchors at n=16 and 64 anchors at n>=64 (so n=16 and n=64 are pure
+    # anchors), queries conditioned on the anchors, nested-dropout queries,
+    # FROZEN vision encoder (no LoRA), language-modeling loss only (no
+    # distillation). CLIP-L/14-336, TinyLlama, the 4-budget ladder and the paper's
+    # data recipe are kept so the row is comparable to Table III.
+    # Known departures from PARCEL, to be stated with the result: (1) the LM is
+    # fine-tuned in Stage 2 (our recipe); PARCEL's LM training setup is not given
+    # in its main text. (2) Each step trains the n=256 reference plus one uniformly
+    # drawn student budget; PARCEL samples one budget per step.
+    export ELASTIC_RUN_TAG=parcel-faithful
+    export RESAMPLER_ARCH=pool_anchored
+    export ANCHOR_MODE=fixed
+    export ANCHOR_ROUTING="256:64,144:64,64:64,16:16"
+    export USE_KD=False
+    export VISION_LORA_ENABLE=False
+    export LORA_RANKS="8 16 32 64"     # inert while vision LoRA is off
+    export STAGE1_LORA_RANK=64
+    export USE_TOKEN_DECORRELATION=False
+    export TEACHER=self
+    ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful}" >&2
     exit 1
     ;;
 esac
+
+# SEED=<n> makes any recipe a seed replicate: the seed is passed to both stages
+# (HF --seed; unset means the HF default, 42) and the run tag gets a -seed<n>
+# suffix so it never overwrites the seed-42 checkpoint.
+if [ -n "${SEED:-}" ]; then
+    export SEED
+    export ELASTIC_RUN_TAG="${ELASTIC_RUN_TAG}-seed${SEED}"
+fi
+
+# TAG_SUFFIX=-smoke keeps a test run's checkpoints out of the real run's directories.
+if [ -n "${TAG_SUFFIX:-}" ]; then
+    export ELASTIC_RUN_TAG="${ELASTIC_RUN_TAG}${TAG_SUFFIX}"
+fi
 
 GRES="${GRES:-$DEFAULT_GRES}"
 CKPT="/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-${SLM_KEY}-${ELASTIC_RUN_TAG}"
@@ -358,7 +462,7 @@ echo "── ${ELASTIC_RUN_TAG} (${SLM_KEY}) ───────────�
 for v in TOK_LEVELS LORA_RANKS STAGE1_TOK_LEVEL STAGE1_LORA_RANK RESAMPLER_ARCH \
          ANCHOR_MODE ANCHOR_RATIO ANCHOR_ROUTING USE_TOKEN_DECORRELATION DECORR_WEIGHT \
          VISION_LORA_ENABLE VISION_LORA_SPECIALIZE_TOK TEACHER TEACHER_MODEL_PATH \
-         PREFIX_KL_WEIGHT VISION_TOWER; do
+         PREFIX_KL_WEIGHT VISION_TOWER USE_KD USE_POS_EMBED POS_EMBED_TYPE SEED; do
     printf '  %-26s %s\n' "$v" "${!v:-<launcher default>}"
 done
 printf '  %-26s %s\n' "gres" "$GRES"
@@ -366,7 +470,17 @@ printf '  %-26s %s\n' "eval --array" "$ARRAY"
 
 if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN set; nothing submitted."; exit 0; fi
 
-TRAIN_ID=$(sbatch --parsable --gres="$GRES" run_job_slm.sh "$SLM_KEY")
+# RUN_INLINE=1: run Stage 1 then Stage 2 in THIS shell with the recipe's exact
+# environment (for smoke tests inside an sbatch job; combine with MAX_STEPS,
+# NUM_GPUS and TAG_SUFFIX). Nothing is submitted or logged.
+if [ -n "${RUN_INLINE:-}" ]; then
+    bash scripts/v1_5/pretrain_elastic_slm.sh "$SLM_KEY" && bash scripts/v1_5/finetune_elastic_slm.sh "$SLM_KEY"
+    exit $?
+fi
+
+# DEPENDENCY="afterok:123:456" holds the training job until those jobs finish
+# (used to queue follow-up experiments behind running ones).
+TRAIN_ID=$(sbatch --parsable ${DEPENDENCY:+--dependency=$DEPENDENCY} --gres="$GRES" run_job_slm.sh "$SLM_KEY")
 echo "  train job   : $TRAIN_ID  (Stage 1 + Stage 2)"
 EVAL_ID=$(sbatch --parsable --dependency=afterok:"$TRAIN_ID" --array="$ARRAY" \
                  eval_lmms_level.sh "$CKPT")

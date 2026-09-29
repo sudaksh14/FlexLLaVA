@@ -8,5 +8,17 @@ submitted_utc	recipe	slm_key	train_job	eval_job	tok_levels	lora_ranks	resampler	
 2026-09-17T08:31:03Z	final-parcel-resub-a40	qwen0.5b	27456	27457	256 144 64 16	8 16 32 64	pool_anchored	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-qwen0.5b-final-parcel
 2026-09-18T16:17:03Z	final-parcel-576ctrl	tinyllama	27480	27481	576	64	pool_anchored	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-final-parcel-576ctrl
 2026-09-19T14:08:45Z	mqt-4tok-4tok	tinyllama	27487	27488	4 tokens	baseline	mqt-4tok	-	-	-	/var/scratch/skalra/flexllava/checkpoints/mqt-finetune-tinyllama-4tok
-2026-09-29T11:43:19Z	m3-ladder	tinyllama	27537	-	256 144 64 16	baseline	m3-ladder	-	-	-	/var/scratch/skalra/flexllava/checkpoints/baseline-tinyllama-ladder-finetune
-2026-09-29T11:43:19Z	mqt-ladder	tinyllama	27538	-	256 144 64 16	baseline	mqt-ladder	-	-	-	/var/scratch/skalra/flexllava/checkpoints/mqt-finetune-tinyllama-ladder
+2026-09-29T11:43:19Z	m3-ladder-CANCELLED-ran-as-single-256	tinyllama	27537	-	256	baseline	m3-ladder	-	-	-	/var/scratch/skalra/flexllava/checkpoints/baseline-tinyllama-ladder-finetune
+2026-09-29T11:43:19Z	mqt-ladder-CANCELLED-ran-as-single-256	tinyllama	27538	-	256	baseline	mqt-ladder	-	-	-	/var/scratch/skalra/flexllava/checkpoints/mqt-finetune-tinyllama-ladder
+2026-09-29T14:44:13Z	m3-ladder-CANCELLED-moved-to-hipster	tinyllama	27589	27564	256 144 64 16	baseline	m3-ladder	-	-	-	/var/scratch/skalra/flexllava/checkpoints/baseline-tinyllama-ladder-finetune
+2026-09-29T14:44:13Z	mqt-ladder	tinyllama	27558	27563	256 144 64 16	baseline	mqt-ladder	-	-	-	/var/scratch/skalra/flexllava/checkpoints/mqt-finetune-tinyllama-ladder
+2026-09-29T15:17:04Z	v4-query-CANCELLED-qwen-series-dropped	qwen1.5b	27567	27568	256 144 64 16	8 16 32 64	query	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-qwen1.5b-v4-query
+2026-09-29T15:17:04Z	v4-query-CANCELLED-qwen-series-dropped	qwen0.5b	27570	27571	256 144 64 16	8 16 32 64	query	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-qwen0.5b-v4-query
+2026-09-29T15:17:04Z	v4-query-CANCELLED-qwen-series-dropped	qwen3b	27573	27574	256 144 64 16	8 16 32 64	query	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-qwen3b-v4-query
+2026-09-29T15:17:05Z	v4-query-sincos	tinyllama	27576	27577	256 144 64 16	8 16 32 64	query	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-v4-query-sincos
+2026-09-29T15:17:05Z	v4-query-nopos	tinyllama	27579	27580	256 144 64 16	8 16 32 64	query	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-v4-query-nopos
+2026-09-29T15:17:05Z	parcel-faithful	tinyllama	27582	27583	256 144 64 16	8 16 32 64	pool_anchored	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-parcel-faithful
+2026-09-29T15:17:05Z	final-parcel-seed1	tinyllama	27585	27586	256 144 64 16	8 16 32 64	pool_anchored	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-final-parcel-seed1
+2026-09-29T15:17:05Z	final-parcel-seed2-CANCELLED-single-seed-only	tinyllama	27587	27588	256 144 64 16	8 16 32 64	pool_anchored	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-final-parcel-seed2
+2026-09-29T15:47:01Z	v4-query-256-CANCELLED-rank-scaling-moved-to-hipster	mobilellama	27590	27591	256	64	query	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-mobilellama-v4-query-256
+2026-09-29T15:47:01Z	v4-query-256-CANCELLED-rank-scaling-moved-to-hipster	smollm2	27593	27594	256	64	query	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-smollm2-v4-query-256
