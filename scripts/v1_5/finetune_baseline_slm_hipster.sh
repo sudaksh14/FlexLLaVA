@@ -96,6 +96,7 @@ deepspeed --num_gpus ${NUM_GPUS} --master_port ${MASTER_PORT} llava/train/train_
     --tf32 True \
     --model_max_length 2048 \
     --gradient_checkpointing True \
+    --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to wandb \
