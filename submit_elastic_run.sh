@@ -417,15 +417,17 @@ case "$RUN" in
     # FROZEN vision encoder (no LoRA), language-modeling loss only (no
     # distillation). CLIP-L/14-336, TinyLlama, the 4-budget ladder and the paper's
     # data recipe are kept so the row is comparable to Table III.
-    # Known departures from PARCEL, to be stated with the result: (1) the LM is
-    # fine-tuned in Stage 2 (our recipe); PARCEL's LM training setup is not given
-    # in its main text. (2) Each step trains the n=256 reference plus one uniformly
-    # drawn student budget; PARCEL samples one budget per step.
+    # SINGLE_BUDGET_PER_STEP=True: each step trains ONE budget drawn uniformly from the
+    # ladder, with no always-present n=256 reference level, as in PARCEL's nested-dropout
+    # training ("we sample a budget B ... keep the first B-Np queries").
+    # Known departure from PARCEL, to be stated with the result: the LM is fine-tuned in
+    # Stage 2 (our recipe); PARCEL's LM training setup is not given in its main text.
     export ELASTIC_RUN_TAG=parcel-faithful
     export RESAMPLER_ARCH=pool_anchored
     export ANCHOR_MODE=fixed
     export ANCHOR_ROUTING="256:64,144:64,64:64,16:16"
     export USE_KD=False
+    export SINGLE_BUDGET_PER_STEP=True
     export VISION_LORA_ENABLE=False
     export LORA_RANKS="8 16 32 64"     # inert while vision LoRA is off
     export STAGE1_LORA_RANK=64
@@ -462,7 +464,7 @@ echo "── ${ELASTIC_RUN_TAG} (${SLM_KEY}) ───────────�
 for v in TOK_LEVELS LORA_RANKS STAGE1_TOK_LEVEL STAGE1_LORA_RANK RESAMPLER_ARCH \
          ANCHOR_MODE ANCHOR_RATIO ANCHOR_ROUTING USE_TOKEN_DECORRELATION DECORR_WEIGHT \
          VISION_LORA_ENABLE VISION_LORA_SPECIALIZE_TOK TEACHER TEACHER_MODEL_PATH \
-         PREFIX_KL_WEIGHT VISION_TOWER USE_KD USE_POS_EMBED POS_EMBED_TYPE SEED; do
+         PREFIX_KL_WEIGHT VISION_TOWER USE_KD SINGLE_BUDGET_PER_STEP USE_POS_EMBED POS_EMBED_TYPE SEED; do
     printf '  %-26s %s\n' "$v" "${!v:-<launcher default>}"
 done
 printf '  %-26s %s\n' "gres" "$GRES"
