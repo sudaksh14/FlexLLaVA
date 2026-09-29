@@ -58,7 +58,19 @@ def get_matry_n(num_visual_tokens):
     elif num_visual_tokens == 'second_stage':
         matry_list = range(2, 258, 2)
         return random.choice(matry_list)
-    
+    elif isinstance(num_visual_tokens, str) and ',' in num_visual_tokens:
+        # Same per-forward-call random.choice() as 'second_stage' (MQT's own
+        # published multi-budget recipe -- this is called fresh every training
+        # step via prepare_inputs_labels_for_multimodal -> encode_images, so
+        # the list is genuinely re-sampled throughout training, not resolved
+        # once at startup), but drawing only from an explicit candidate list
+        # instead of the full range(2, 258, 2). Used to match MQT's native
+        # training loop to a specific external token ladder (e.g. our own
+        # elastic budgets) for a fair comparison, rather than MQT's default
+        # dense range.
+        matry_list = [int(x) for x in num_visual_tokens.split(',')]
+        return random.choice(matry_list)
+
     try:
         num_visual_tokens = int(num_visual_tokens)
         if 1 <= num_visual_tokens <= 256:
