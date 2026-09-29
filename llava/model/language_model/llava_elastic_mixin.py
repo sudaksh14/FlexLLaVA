@@ -103,7 +103,9 @@ class LlavaElasticMixin:
         teacher_tok = cfg.tok_levels[cfg.kl_teacher_tok_level]
         n = cfg.n_sample_students
         n_students_total = len(cfg.tok_levels) - 1
-        if 0 < n < n_students_total:
+        if getattr(cfg, "single_budget_per_step", False):
+            mode = "single-budget-per-step — one uniformly drawn budget per step, no reference level"
+        elif 0 < n < n_students_total:
             mode = f"sample_student({n}) — teacher + {n} random student{'s' if n > 1 else ''} per step"
         else:
             mode = "all-levels — full grid every step"
@@ -265,7 +267,14 @@ class LlavaElasticMixin:
             # expectation 1/n_students_total of the time, matching full-grid.
             n_sample = cfg.n_sample_students
             students_all = [l for l in grid if l != cfg.kl_teacher_tok_level]
-            if 0 < n_sample < len(students_all):
+            if getattr(cfg, "single_budget_per_step", False):
+                # One budget per step, uniform over the whole ladder, no reference
+                # level. Seeded from the shared per-forward counter (as the student
+                # draw below) so every DDP rank picks the same level.
+                _brng = random.Random(engine._fwd_step * 2654435761)
+                active_levels = [_brng.choice(grid)]
+                sampled_students = list(active_levels)
+            elif 0 < n_sample < len(students_all):
                 # Seed from the shared per-forward counter so both ranks sample the
                 # SAME students -> same set of levels -> same collective schedule.
                 # (Uncoordinated random.sample here would desync ranks in

@@ -139,6 +139,7 @@ def _write_run_manifest(elastic_args, tok_levels, lora_ranks,
                              "pooling_mode": elastic_args.pooling_mode,
                              "query_selection": elastic_args.query_selection},
         "n_sample_students": elastic_args.n_sample_students,
+        "single_budget_per_step": elastic_args.single_budget_per_step,
         "use_nested_dropout": elastic_args.use_nested_dropout,
         "optimizer":        "adamw_torch (HF default)",
         "learning_rate":    _get_argv_value("--learning_rate"),
@@ -180,7 +181,9 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks,
     teacher_tok = tok_levels[0]
     n = elastic_args.n_sample_students
     n_students_total = len(tok_levels) - 1
-    if 0 < n < n_students_total:
+    if elastic_args.single_budget_per_step:
+        mode = "single-budget-per-step — one uniformly drawn budget per step, no reference level"
+    elif 0 < n < n_students_total:
         mode = f"sample_student({n}) — teacher + {n} random student{'s' if n > 1 else ''} per step"
     else:
         mode = "all-levels — full grid every step"
@@ -394,6 +397,11 @@ def _parse_elastic_args():
                         "exactly its tok_levels entry.")
     p.add_argument("--n_sample_students", type=int, default=0, metavar="INT",
                    help="Students sampled per step (0=full grid, 1=Option A, etc.).")
+    p.add_argument("--single_budget_per_step", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=False, metavar="BOOL",
+                   help="Train ONE budget per step, drawn uniformly from the whole ladder, "
+                        "with no always-present reference level (PARCEL's budget sampling). "
+                        "Overrides --n_sample_students; use with --use_kd False.")
     p.add_argument("--vision_lora_enable", type=lambda x: x.lower() not in ("false", "0", "no"),
                    default=True, metavar="BOOL",
                    help="Inject rank-nested LoRA into the vision tower (default True; "
@@ -577,6 +585,7 @@ def main():
         decorr_weight=elastic_args.decorr_weight,
         kl_teacher_tok_level=0,                 # largest tok level is teacher
         n_sample_students=elastic_args.n_sample_students,
+        single_budget_per_step=elastic_args.single_budget_per_step,
         log_adapter_every=50,
     )
 

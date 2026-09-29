@@ -184,10 +184,11 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --prefix_kl_weight "${PREFIX_KL_WEIGHT:-0.1}" \
     --coral_weight 0.1 \
     --use_coral False \
-    --use_pos_embed True \
-    --pos_embed_type learned \
+    --use_pos_embed "${USE_POS_EMBED:-True}" \
+    --pos_embed_type "${POS_EMBED_TYPE:-learned}" \
     --use_nested_dropout False \
     --n_sample_students 1 \
+    --single_budget_per_step "${SINGLE_BUDGET_PER_STEP:-False}" \
     --vision_lora_enable "${VISION_LORA_ENABLE:-False}" \
     --vision_lora_specialize_tok "${VISION_LORA_SPECIALIZE_TOK:-True}" \
     --lora_enable False \
@@ -213,6 +214,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --output_dir "${OUTPUT_DIR}" \
     --num_train_epochs 1 \
     ${MAX_STEPS:+--max_steps ${MAX_STEPS}} \
+    ${SEED:+--seed ${SEED}} \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 2 \
     --gradient_accumulation_steps ${GRAD_ACCUM} \

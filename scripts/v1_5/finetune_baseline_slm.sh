@@ -49,7 +49,14 @@ case "$LLM_KEY" in
 esac
 
 TAG="${BASELINE_RUN_TAG:+-${BASELINE_RUN_TAG}}"
-PRETRAIN_DIR="/var/scratch/skalra/flexllava/checkpoints/baseline-${LLM_KEY}${TAG}-pretrain"
+# BASELINE_PRETRAIN_TAG (mirrors finetune_mqt_baseline.sh): Stage 1 here trains
+# the plain projector on all 576 tokens, independent of Stage 2's token budget
+# (MATRYOSHKA_SCALE only affects Stage 2's avg-pool), so the SAME Stage 1
+# checkpoint is reusable across every token-ladder level. Defaults to TAG so
+# every existing caller (one tag for both stages) is unaffected.
+PRETRAIN_TAG="${BASELINE_PRETRAIN_TAG:+-${BASELINE_PRETRAIN_TAG}}"
+: "${PRETRAIN_TAG:=$TAG}"
+PRETRAIN_DIR="/var/scratch/skalra/flexllava/checkpoints/baseline-${LLM_KEY}${PRETRAIN_TAG}-pretrain"
 OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/baseline-${LLM_KEY}${TAG}-finetune"
 LOG_DIR="/var/scratch/skalra/flexllava/logs/baseline-${LLM_KEY}${TAG}-finetune"
 RUN_NAME="baseline-${LLM_KEY}-576tok${TAG}-finetune"
@@ -107,6 +114,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_mem.py \
     --tf32 True \
     --model_max_length 2048 \
     --gradient_checkpointing True \
+    --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
     --dataloader_num_workers 8 \
     --lazy_preprocess True \
     --report_to wandb \
