@@ -47,7 +47,18 @@ if [ -z "$LABEL" ]; then
 fi
 
 MODEL_TAG=$(basename "$MODEL_PATH")
-OUTDIR="/var/scratch/skalra/flexllava/eval_logs/croppilot/${MODE}/${MODEL_TAG}/${LABEL}"
+# Box source.  Default = the ViCrop ground-truth boxes (oracle).  For another
+# source set SRC_TAG=<name> (boxes read from textvqa_val_selfroi_<name>.json);
+# its results go to eval_logs/croppilot_<name>/ so oracle logs are never mixed.
+SRC_TAG=${SRC_TAG:-}
+if [ -n "$SRC_TAG" ]; then
+    export CROPPILOT_SIDECAR=/var/scratch/skalra/flexllava/croppilot/textvqa_val_selfroi_${SRC_TAG}.json
+    [ -f "$CROPPILOT_SIDECAR" ] || { echo "ERROR: $CROPPILOT_SIDECAR not found" >&2; exit 1; }
+    OUTDIR="/var/scratch/skalra/flexllava/eval_logs/croppilot_${SRC_TAG}/${MODE}/${MODEL_TAG}/${LABEL}"
+else
+    export CROPPILOT_SIDECAR=/var/scratch/skalra/flexllava/croppilot/textvqa_val_gtbox.json
+    OUTDIR="/var/scratch/skalra/flexllava/eval_logs/croppilot/${MODE}/${MODEL_TAG}/${LABEL}"
+fi
 
 LIMIT_ARG=""
 if [ -n "$EVAL_LIMIT" ]; then
@@ -60,7 +71,6 @@ EFF_HARDWARE="${EFF_HARDWARE:-jetson_orin_nano_8gb}"
 
 export HF_HOME=/var/scratch/skalra/.cache/huggingface
 export HF_DATASETS_CACHE=/var/scratch/skalra/.cache/huggingface/datasets
-export CROPPILOT_SIDECAR=/var/scratch/skalra/flexllava/croppilot/textvqa_val_gtbox.json
 
 cd /home/skalra/FlexLLaVA
 
@@ -68,7 +78,7 @@ echo "Job started: $(date)"
 echo "Node: $(hostname)"
 nvidia-smi | head -12
 echo "Model:     $MODEL_PATH"
-echo "Mode:      $MODE   tasks: $TASKS"
+echo "Mode:      $MODE   tasks: $TASKS   box source: ${SRC_TAG:-oracle} ($CROPPILOT_SIDECAR)"
 echo "tok_level: $LEVEL ($LABEL)"
 echo "Outdir:    $OUTDIR"
 
