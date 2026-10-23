@@ -1,0 +1,23 @@
+task: textvqa_val_gtbox_crop
+dataset_path: lmms-lab/textvqa
+test_split: validation
+output_type: generate_until
+process_docs: !function utils.process_docs
+doc_to_visual: !function utils.doc_to_visual_crop
+doc_to_text: !function utils.doc_to_text_stock
+doc_to_target: "answer"
+generation_kwargs:
+  until:
+    - "ASSISTANT:"
+process_results: !function utils.process_results
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+    ignore_case: true
+    ignore_punctuation: true
+model_specific_prompt_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nAnswer the question using a single word or phrase."
+    ocr: false
