@@ -8,8 +8,11 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=/var/scratch/skalra/flexllava/logs/surfdrive-upload-%j.out
 # Resumable upload of all checkpoints to a SURFdrive public share via WebDAV.
-# Usage: sbatch scripts/upload_surfdrive.sh [TOKEN]
+# Usage: sbatch scripts/upload_surfdrive.sh [TOKEN] [SUBDIR]
+#   SUBDIR (e.g. baseline-tinyllama-finetune) restricts the upload to one checkpoint folder and skips its
+#   checkpoint-N/ subdirs (DeepSpeed optimizer states); without it everything under checkpoints/ is uploaded.
 TOKEN=${1:-w3BNexeJk9WxwCC}
+SUBDIR=${2:-}
 SRC=/var/scratch/skalra/flexllava/checkpoints
 DAV=https://surfdrive.surf.nl/public.php/webdav
 export TOKEN DAV SRC
@@ -31,10 +34,11 @@ upload() {
 export -f upload
 
 cd "$SRC"
+SCOPE=${SUBDIR:-.}
 # create all directories (MKCOL is idempotent: 405 if exists)
-find . -type d | sed 's|^\./||' | grep -v '^\.$' | sort | while read -r d; do
+find "$SCOPE" -type d -not -path '*/checkpoint-*' | sed 's|^\./||' | grep -v '^\.$' | sort | while read -r d; do
   curl -s -o /dev/null -u "$TOKEN:" -X MKCOL "$DAV/$d"
 done
-find "$SRC" -type f -print0 | xargs -0 -P 8 -I{} bash -c 'upload "{}"' | tee /var/scratch/skalra/flexllava/logs/surfdrive-upload-files.log
+find "$SRC/$SUBDIR" -type f -not -path '*/checkpoint-*' -print0 | xargs -0 -P 8 -I{} bash -c 'upload "{}"' | tee /var/scratch/skalra/flexllava/logs/surfdrive-upload-files.log
 grep -c '^FAIL' /var/scratch/skalra/flexllava/logs/surfdrive-upload-files.log
 echo DONE
