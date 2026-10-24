@@ -60,6 +60,8 @@ class Llava(lmms):
         truncate_context=False,  # whether to truncate the context in generation, set it False for LLaVA-1.6
         customized_config=None,
         matryoshka_vis_token_scale= None,
+        fastv_k: Optional[int] = None,        # FastV baseline (llava/model/fastv.py); needs attn_implementation=eager
+        fastv_ratio: Optional[float] = None,  # fraction of visual tokens dropped at layer fastv_k
         **kwargs,
     ) -> None:
         super().__init__()
@@ -95,6 +97,9 @@ class Llava(lmms):
             self._tokenizer, self._model, self._image_processor, self._max_length = load_pretrained_model(pretrained, None, model_name, device_map=self.device_map, **llava_model_args)
         if matryoshka_vis_token_scale!= None:
             self._model.config.matryoshka_vis_token_scale = matryoshka_vis_token_scale
+        if fastv_ratio is not None:
+            from llava.model.fastv import enable_fastv
+            enable_fastv(self._model, int(fastv_k if fastv_k is not None else 2), float(fastv_ratio))
         self._config = self._model.config
         self.model.eval()
         self.model.tie_weights()
