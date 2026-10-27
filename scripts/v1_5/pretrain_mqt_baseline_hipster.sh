@@ -23,6 +23,7 @@ LLM_KEY=${1:-tinyllama}
 LOCAL_SSD=${LOCAL_SSD:?LOCAL_SSD must be set by the caller (run_job_hipster_mqt_baseline.sh) to a node-local staged data directory}
 SAVE_ROOT=/home/skalra/flexllava_saves
 CHECKPOINT_ROOT=/scratch/skalra/flexllava_saves/checkpoints
+mkdir -p "$CHECKPOINT_ROOT"   # hipster: ensure the checkpoint root exists
 REPO_ROOT=/home/skalra/FlexLLaVA
 
 case "$LLM_KEY" in

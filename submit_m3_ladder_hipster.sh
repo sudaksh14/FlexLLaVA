@@ -11,6 +11,7 @@
 # `--export=ALL,VAR=256,144,64,16` (sbatch splits on the commas and the job
 # silently receives VAR=256).
 set -uo pipefail
+mkdir -p /scratch/skalra/flexllava_saves/checkpoints   # hipster: make sure the checkpoint root exists before anything writes to it
 cd "$(dirname "$0")"
 
 PARTITION="${1:-performance}"

@@ -53,6 +53,7 @@ DAS6_HOST=fs2.das6.science.uva.nl
 DAS6_DATA=/var/scratch/skalra/flexllava/data/LLaVA-Finetune
 DAS6_CKPT_ROOT=/var/scratch/skalra/flexllava/checkpoints
 CKPT_ROOT=/scratch/skalra/flexllava_saves/checkpoints
+mkdir -p "$CKPT_ROOT"   # hipster: ensure the checkpoint root exists
 PRETRAIN_NAME="baseline-${SLM_KEY}${BASELINE_PRETRAIN_TAG:+-${BASELINE_PRETRAIN_TAG}}-pretrain"
 LOCAL_SSD=/local_scratch/skalra/flexllava_data_${SLURM_JOB_ID}
 mkdir -p "$LOCAL_SSD/LLaVA-Finetune"

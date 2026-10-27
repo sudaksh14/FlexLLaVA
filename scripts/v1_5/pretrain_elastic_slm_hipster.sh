@@ -27,6 +27,7 @@ SAVE_ROOT=/home/skalra/flexllava_saves
 # wandb deliberately stay under SAVE_ROOT (/home) -- only checkpoints were
 # asked to move.
 CHECKPOINT_ROOT=/scratch/skalra/flexllava_saves/checkpoints
+mkdir -p "$CHECKPOINT_ROOT"   # hipster: ensure the checkpoint root exists
 
 case "$LLM_KEY" in
   qwen0.5b)    MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct";         CONV_VERSION="chatml" ;;

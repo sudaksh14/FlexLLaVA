@@ -36,6 +36,7 @@
 # MobileLLaMA V8+7B KD). Override CELLS= to select a different subset; there
 # is deliberately no "run everything" default, unlike the DAS-6 script.
 set -uo pipefail
+mkdir -p /scratch/skalra/flexllava_saves/checkpoints   # hipster: make sure the checkpoint root exists before anything writes to it
 cd "$(dirname "$0")"
 
 SUBMIT="${SUBMIT:-}"

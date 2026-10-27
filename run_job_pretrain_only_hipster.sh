@@ -33,6 +33,7 @@
 # NO --exclusive, same shared-cluster etiquette as run_job_hipster.sh.
 
 set -e
+mkdir -p /scratch/skalra/flexllava_saves/checkpoints   # hipster: make sure the checkpoint root exists before anything writes to it
 
 echo "Job Started"; date
 echo "Node name: $(hostname)"

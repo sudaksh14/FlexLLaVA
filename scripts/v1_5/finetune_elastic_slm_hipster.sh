@@ -25,6 +25,7 @@ SAVE_ROOT=/home/skalra/flexllava_saves
 # slm_hipster.sh for why. Must match that script's CHECKPOINT_ROOT or Stage
 # 2 warm-starts from the wrong place (silently starts fresh, or errors).
 CHECKPOINT_ROOT=/scratch/skalra/flexllava_saves/checkpoints
+mkdir -p "$CHECKPOINT_ROOT"   # hipster: ensure the checkpoint root exists
 
 case "$LLM_KEY" in
   qwen0.5b)    MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct";         CONV_VERSION="chatml" ;;
@@ -101,6 +102,7 @@ deepspeed --num_gpus ${NUM_GPUS} --master_port ${MASTER_PORT} llava/train/train_
     --single_budget_per_step "${SINGLE_BUDGET_PER_STEP:-False}" \
     --budget_sampling "${BUDGET_SAMPLING:-ladder}" \
     --budget_min "${BUDGET_MIN:-16}" --budget_max "${BUDGET_MAX:-256}" --budget_step "${BUDGET_STEP:-2}" \
+    --lora_small_budget_max "${LORA_SMALL_BUDGET_MAX:-0}" \
     --parcel_query_out_norm "${PARCEL_QUERY_OUT_NORM:-True}" \
     --use_nested_dropout False \
     --n_sample_students 1 \

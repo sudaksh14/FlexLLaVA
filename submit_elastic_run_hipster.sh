@@ -32,6 +32,7 @@
 # performance. Treat these as real (if often conservative/backfill-
 # pessimistic) scheduler signals, not guesses.
 set -euo pipefail
+mkdir -p /scratch/skalra/flexllava_saves/checkpoints   # hipster: make sure the checkpoint root exists before anything writes to it
 cd "$(dirname "$0")"
 
 RUN=${1:-}

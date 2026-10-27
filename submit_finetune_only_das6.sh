@@ -13,6 +13,7 @@
 # than the one the target checkpoint's weights were saved under, which fails
 # to load correctly, possibly silently.
 set -euo pipefail
+mkdir -p /scratch/skalra/flexllava_saves/checkpoints   # hipster: make sure the checkpoint root exists before anything writes to it
 cd "$(dirname "$0")"
 
 RUN=${1:-}

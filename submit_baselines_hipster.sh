@@ -34,6 +34,7 @@
 #       real MQT Stage 2 anywhere will be this run. Watch the first ~200 steps.
 # ---------------------------------------------------------------------------
 set -uo pipefail
+mkdir -p /scratch/skalra/flexllava_saves/checkpoints   # hipster: make sure the checkpoint root exists before anything writes to it
 cd "$(dirname "$0")"
 
 EXP=${1:-}

@@ -20,6 +20,7 @@
 # resampler_arch) reconstructs the model differently from whatever the
 # target checkpoint's weights were saved under.
 set -euo pipefail
+mkdir -p /scratch/skalra/flexllava_saves/checkpoints   # hipster: make sure the checkpoint root exists before anything writes to it
 cd "$(dirname "$0")"
 
 RUN=${1:-}
