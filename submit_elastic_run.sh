@@ -545,8 +545,10 @@ fi
 
 # DEPENDENCY="afterok:123:456" holds the training job until those jobs finish
 # (used to queue follow-up experiments behind running ones).
-EXCLUDE_NODES="${EXCLUDE_NODES:-node205}"   # standing rule: GPU jobs only on node206-208 (SBATCH_EXCLUDE was not honoured: job 27985 landed on node205)
-TRAIN_ID=$(sbatch --parsable --exclude="$EXCLUDE_NODES" ${DEPENDENCY:+--dependency=$DEPENDENCY} --gres="$GRES" run_job_slm.sh "$SLM_KEY")
+# Standing rule: the node206-208 restriction applies to EVAL jobs only (SBATCH_EXCLUDE is not honoured, so it is
+# passed explicitly). Training may use any GPU node; TRAIN_NODELIST pins it (e.g. node205 for A40:2).
+EXCLUDE_NODES="${EXCLUDE_NODES:-node205}"
+TRAIN_ID=$(sbatch --parsable ${TRAIN_NODELIST:+--nodelist=$TRAIN_NODELIST} ${DEPENDENCY:+--dependency=$DEPENDENCY} --gres="$GRES" run_job_slm.sh "$SLM_KEY")
 echo "  train job   : $TRAIN_ID  (Stage 1 + Stage 2)"
 EVAL_ID=$(sbatch --parsable --exclude="$EXCLUDE_NODES" --dependency=afterok:"$TRAIN_ID" --array="$ARRAY" \
                  eval_lmms_level.sh "$CKPT")
