@@ -545,9 +545,10 @@ fi
 
 # DEPENDENCY="afterok:123:456" holds the training job until those jobs finish
 # (used to queue follow-up experiments behind running ones).
-TRAIN_ID=$(sbatch --parsable ${DEPENDENCY:+--dependency=$DEPENDENCY} --gres="$GRES" run_job_slm.sh "$SLM_KEY")
+EXCLUDE_NODES="${EXCLUDE_NODES:-node205}"   # standing rule: GPU jobs only on node206-208 (SBATCH_EXCLUDE was not honoured: job 27985 landed on node205)
+TRAIN_ID=$(sbatch --parsable --exclude="$EXCLUDE_NODES" ${DEPENDENCY:+--dependency=$DEPENDENCY} --gres="$GRES" run_job_slm.sh "$SLM_KEY")
 echo "  train job   : $TRAIN_ID  (Stage 1 + Stage 2)"
-EVAL_ID=$(sbatch --parsable --dependency=afterok:"$TRAIN_ID" --array="$ARRAY" \
+EVAL_ID=$(sbatch --parsable --exclude="$EXCLUDE_NODES" --dependency=afterok:"$TRAIN_ID" --array="$ARRAY" \
                  eval_lmms_level.sh "$CKPT")
 echo "  eval job    : $EVAL_ID  (afterok:$TRAIN_ID)"
 echo "  checkpoint  : $CKPT"

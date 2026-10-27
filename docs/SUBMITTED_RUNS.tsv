@@ -24,4 +24,4 @@ submitted_utc	recipe	slm_key	train_job	eval_job	tok_levels	lora_ranks	resampler	
 2026-09-29T15:47:01Z	v4-query-256-CANCELLED-rank-scaling-moved-to-hipster	smollm2	27593	27594	256	64	query	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-smollm2-v4-query-256
 2026-09-29T16:11:06Z	parcel-faithful	tinyllama	27598	27599	256 144 64 16	8 16 32 64	pool_anchored	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-parcel-faithful
 2026-10-27T13:51:34Z	parcel-exact-nolora	tinyllama	27983	27984	256 144 64 16	8 16 32 64	parcel_exact	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-parcel-exact-nolora
-2026-10-27T13:51:34Z	parcel-exact-lora	tinyllama	27985	27986	256 144 64 16	8 16 32 64	parcel_exact	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-parcel-exact-lora
+2026-10-27T14:16:41Z	parcel-exact-lora	tinyllama	27989	27990	256 144 64 16	8 16 32 64	parcel_exact	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-parcel-exact-lora
