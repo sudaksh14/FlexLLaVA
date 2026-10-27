@@ -434,8 +434,62 @@ case "$RUN" in
     export USE_TOKEN_DECORRELATION=False
     export TEACHER=self
     ;;
+  parcel-exact-nolora|parcel-exact-lora)
+    # THE PARCEL PIPELINE (arXiv 2605.30126), run next to -- never instead of --
+    # the Nest-VLM pipeline (RESAMPLER_ARCH=pool_anchored, final-parcel). Every line
+    # below is either what the paper states (App. E unless noted) or is marked.
+    #
+    #   connector   resampler_arch=parcel_exact: pooled anchors concatenated to the
+    #               output RAW (no post-self-attention anchors, no LayerNorm on
+    #               them); only the queries go through ONE Query<->Pool self-attention
+    #               block and ONE Query->ViT cross-attention block (depth 1). Pure-
+    #               anchor budgets are allowed (N_q = 0). Final LayerNorm on the
+    #               queries only: NOT specified by the paper (PARCEL_QUERY_OUT_NORM).
+    #   routing     Sec. 3.3, literal step function: 16 <= B < 64 -> 4x4 = 16 anchors,
+    #               64 <= B <= 256 -> 8x8 = 64 anchors, N_q = B - N_p. The anchor COUNTS
+    #               are the paper's; on our 24x24 CLIP grid they are pooled 6x6 / 3x3
+    #               blocks (the paper's 16x16 SigLIP grid pools 4x4 / 2x2).
+    #   budgets     B ~ Uniform{16, 18, ..., 256}, one budget per step, arbitrary
+    #               (not a ladder entry) -- "we sample an even total budget". One
+    #               forward per step, so the cost per step is PARCEL's. Evaluation
+    #               uses our 256/144/64/16 ladder.
+    #   loss        plain next-token cross-entropy on the response tokens, nothing
+    #               else. PARCEL describes NO distillation and no teacher (it follows
+    #               the PaliGemma-2 recipe), so USE_KD=False, no CORAL, no decorr.
+    #   optimiser   AdamW (HF default betas), LR 1e-5 = PaliGemma-2's 2e-5 x 0.5
+    #               (App. E) for Stage 2; Stage 1 keeps the connector-only LR 1e-3 of
+    #               the LLaVA recipe (the paper's connector schedule is not given).
+    #               NOT matchable: global batch 8192 vs our 128, TPU/JAX, 100M + 100M
+    #               pretraining samples vs our 558K + 665K, trainable SigLIP encoder.
+    #   data        unchanged: LLaVA-1.5 (558K caption pretraining, 665K mix).
+    #   vision      CLIP-L/14-336, frozen (nolora) or rank-nested per-level LoRA with
+    #               the adapter chosen by the smallest ladder level >= B (lora).
+    export RESAMPLER_ARCH=parcel_exact
+    export ANCHOR_MODE=fixed
+    export ANCHOR_ROUTING="16:16,64:64"
+    export SINGLE_BUDGET_PER_STEP=True
+    export BUDGET_SAMPLING=uniform_range
+    export BUDGET_MIN=16 BUDGET_MAX=256 BUDGET_STEP=2
+    export USE_KD=False USE_CORAL=False
+    export USE_TOKEN_DECORRELATION=False
+    export USE_POS_EMBED=False
+    export TEACHER=self
+    export LR=1e-5
+    export TOK_LEVELS="256 144 64 16"
+    export STAGE1_TOK_LEVEL=256
+    export STAGE1_LORA_RANK=64
+    export LORA_RANKS="8 16 32 64"       # inert while vision LoRA is off
+    if [ "$RUN" = "parcel-exact-lora" ]; then
+        export ELASTIC_RUN_TAG=parcel-exact-lora
+        export VISION_LORA_ENABLE=True
+        export VISION_LORA_SPECIALIZE_TOK=True
+    else
+        export ELASTIC_RUN_TAG=parcel-exact-nolora
+        export VISION_LORA_ENABLE=False
+    fi
+    ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful|parcel-exact-nolora|parcel-exact-lora}" >&2
     exit 1
     ;;
 esac
@@ -464,7 +518,7 @@ echo "── ${ELASTIC_RUN_TAG} (${SLM_KEY}) ───────────�
 for v in TOK_LEVELS LORA_RANKS STAGE1_TOK_LEVEL STAGE1_LORA_RANK RESAMPLER_ARCH \
          ANCHOR_MODE ANCHOR_RATIO ANCHOR_ROUTING USE_TOKEN_DECORRELATION DECORR_WEIGHT \
          VISION_LORA_ENABLE VISION_LORA_SPECIALIZE_TOK TEACHER TEACHER_MODEL_PATH \
-         PREFIX_KL_WEIGHT VISION_TOWER USE_KD SINGLE_BUDGET_PER_STEP USE_POS_EMBED POS_EMBED_TYPE SEED; do
+         PREFIX_KL_WEIGHT VISION_TOWER USE_KD SINGLE_BUDGET_PER_STEP BUDGET_SAMPLING BUDGET_MIN BUDGET_MAX BUDGET_STEP LR USE_POS_EMBED POS_EMBED_TYPE SEED; do
     printf '  %-26s %s\n' "$v" "${!v:-<launcher default>}"
 done
 printf '  %-26s %s\n' "gres" "$GRES"

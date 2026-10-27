@@ -160,7 +160,8 @@ class NestedQueryResampler(nn.Module):
                  query_selection: str = "prefix",
                  resampler_arch: str = "query", anchor_routing=None,
                  anchor_mode: str = "ratio", anchor_ratio: float = 0.25,
-                 num_anchors_adaptive: int = None):
+                 num_anchors_adaptive: int = None,
+                 parcel_query_out_norm: bool = True):
         """
         Args:
             dim:           hidden dim (must match ViT output dim, e.g. 1024 for CLIP-L)
@@ -235,9 +236,20 @@ class NestedQueryResampler(nn.Module):
         self.resampler_arch = resampler_arch
         self.num_patches = num_patches
         self.anchor_routing = dict(anchor_routing) if anchor_routing else None
-        if resampler_arch not in ("query", "pool_anchored"):
+        if resampler_arch not in ("query", "pool_anchored", "parcel_exact"):
             raise ValueError(f"resampler_arch={resampler_arch!r}; expected "
-                             f"'query' or 'pool_anchored'")
+                             f"'query', 'pool_anchored' or 'parcel_exact'")
+        self.parcel_query_out_norm = parcel_query_out_norm
+        if resampler_arch == "parcel_exact":
+            if anchor_mode != "fixed" or not anchor_routing:
+                raise ValueError(
+                    "resampler_arch='parcel_exact' is PARCEL's literal step-function "
+                    "routing: it needs anchor_mode='fixed' and an anchor_routing table "
+                    "(e.g. {16: 16, 64: 64}).")
+            if depth != 1:
+                raise ValueError("resampler_arch='parcel_exact' uses exactly one "
+                                 "Query->ViT cross-attention block (PARCEL App. E); "
+                                 f"got depth={depth}")
         if anchor_mode not in ("ratio", "fixed", "adaptive"):
             raise ValueError(f"anchor_mode={anchor_mode!r}; expected 'ratio', 'fixed', "
                              f"or 'adaptive'")
@@ -248,7 +260,7 @@ class NestedQueryResampler(nn.Module):
         # not required to be perfect squares or divide the patch grid evenly --
         # unlike anchor_routing's meaning in "ratio"/"fixed" mode, checked below.
         self.num_anchors_adaptive = num_anchors_adaptive
-        if resampler_arch == "pool_anchored":
+        if resampler_arch in ("pool_anchored", "parcel_exact"):
             if anchor_mode == "fixed" and not self.anchor_routing:
                 raise ValueError(
                     "resampler_arch='pool_anchored' with anchor_mode='fixed' requires "
@@ -364,6 +376,13 @@ class NestedQueryResampler(nn.Module):
         All modes always leave at least one query token, so the pool_anchored
         branch never degenerates into plain M3 average pooling.
         """
+        if self.resampler_arch == "parcel_exact":
+            # PARCEL's literal routing (Sec. 3.3): a step function over the table,
+            # NO snapping and NO "keep at least one query" rule -- a budget equal to
+            # the anchor grid is a pure-anchor budget (N_q = 0).
+            table = self.anchor_routing
+            below = [b for b in table if b <= budget]
+            return min(table[max(below)] if below else table[min(table)], budget)
         valid = valid_anchor_counts(num_patches)
         if self.anchor_mode == "fixed":
             table = self.anchor_routing
@@ -411,6 +430,8 @@ class NestedQueryResampler(nn.Module):
 
         if self.resampler_arch == "pool_anchored":
             return self._forward_pool_anchored(image_features, n_tok)
+        if self.resampler_arch == "parcel_exact":
+            return self._forward_parcel_exact(image_features, n_tok)
 
         assert n_tok <= self.num_queries
 
@@ -554,6 +575,60 @@ class NestedQueryResampler(nn.Module):
 
         out = torch.cat([anchors_out, q], dim=1)              # (N, n_tok, C)
         return self.out_ln(out)
+
+
+    def _forward_parcel_exact(self, image_features: torch.Tensor,
+                              n_tok: int) -> torch.Tensor:
+        """PARCEL's Pool-Conditioned Query Resampling, as published.
+
+        budget B  ->  N_p pooled anchors (step-function routing)  +  N_q = B - N_p queries
+
+          1. P    = avg_pool(patches)                         deterministic anchors
+          2. [P; Q] -> Query<->Pool self-attention            queries become pool-aware;
+                                                              only the UPDATED QUERIES
+                                                              are kept (Fig. 4, Sec. 3.2)
+          3. Q_SE = CrossAttn(Q = Q_PA, K = V = raw patches)  Eq. 1, one block
+          4. output = [P; Q_SE]                               anchors pass through RAW
+
+        Differs from _forward_pool_anchored in exactly the ways the paper says:
+        the anchors never touch the self-attention output or a LayerNorm, and a
+        budget equal to the anchor grid is a pure-anchor budget (plain M3 pooling).
+        """
+        N, P, _ = image_features.shape
+        n_p = self.n_anchors_for(n_tok, P)
+        n_q = n_tok - n_p
+        if n_q > self.num_queries:
+            raise ValueError(
+                f"budget {n_tok} needs {n_q} query tokens but the bank holds "
+                f"{self.num_queries}; raise num_query_tokens (= tok_levels[0])")
+        anchors = pool_anchors(image_features, n_p)               # (N, n_p, C)
+        if n_q <= 0:
+            return anchors
+
+        if self.use_pos_embed:
+            kv = image_features + self.patch_pos_embed[:, :P, :]
+            q = self.queries[:n_q] + self.query_pos_embed[:n_q]
+        else:
+            kv = image_features
+            q = self.queries[:n_q]
+        q = q.unsqueeze(0).expand(N, -1, -1).contiguous()
+
+        joint = torch.cat([anchors, q], dim=1)                    # (N, n_p + n_q, C)
+        jn = self.pool_self_attn["ln_in"](joint)
+        attn_out, _ = self.pool_self_attn["attn"](jn, jn, jn)
+        joint = joint + attn_out
+        joint = joint + self.pool_self_attn["ff"](self.pool_self_attn["ln_ff"](joint))
+        q = joint[:, n_p:]                                        # updated queries only
+
+        for layer in self.layers:
+            qn = layer["ln_q"](q)
+            kvn = layer["ln_kv"](kv)
+            attn_out, _ = layer["cross_attn"](qn, kvn, kvn)
+            q = q + attn_out
+            q = q + layer["ff"](layer["ln_ff"](q))
+        if self.parcel_query_out_norm:
+            q = self.out_ln(q)
+        return torch.cat([anchors, q], dim=1)                     # (N, n_tok, C)
 
 
 class NestedProjector(nn.Module):

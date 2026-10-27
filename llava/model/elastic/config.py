@@ -111,7 +111,35 @@ class ElasticConfig:
     #                     "forces the queries to encode both the low-frequency
     #                     layout and fine-grained semantic details without an
     #                     underlying spatial anchor" -- our exact failure mode.
+    #   "parcel_exact" -- the connector exactly as PARCEL (arXiv 2605.30126,
+    #                     Sec. 3.2, Fig. 4, App. E) describes it, kept SEPARATE
+    #                     from "pool_anchored" (our Nest-VLM variant) so neither
+    #                     can drift into the other: anchors are concatenated to
+    #                     the output UNCHANGED (no post-self-attention anchors, no
+    #                     LayerNorm on them); only the queries go through one
+    #                     Query<->Pool self-attention block and one Query->ViT
+    #                     cross-attention block (depth 1, as in App. E); the
+    #                     routing is PARCEL's literal step function with pure-
+    #                     anchor budgets allowed (N_q = 0 at B = 16 and B = 64,
+    #                     which "pool_anchored" can never produce).
     resampler_arch: str = "query"
+    # parcel_exact only: LayerNorm on the QUERY outputs (never on the anchors).
+    # The paper does not say whether the connector ends in a norm; a pre-LN
+    # attention block normally does, and without it the queries' residual stream
+    # has an arbitrary scale next to the raw anchors. Recorded so it can be
+    # flipped without a code change.
+    parcel_query_out_norm: bool = True
+    # How training budgets are drawn when single_budget_per_step is on.
+    #   "ladder"        -- uniform over the discrete tok_levels (parcel-faithful).
+    #   "uniform_range" -- PARCEL's own sampling (App. E): B ~ Uniform{budget_min,
+    #       budget_min + budget_step, ..., budget_max} every step, an ARBITRARY
+    #       budget, not a ladder entry. The resampler is run at exactly B; the
+    #       vision-LoRA level (when on) is the smallest ladder level >= B. At
+    #       evaluation the ladder (tok_levels) is used as usual.
+    budget_sampling: str = "ladder"
+    budget_min: int = 16
+    budget_max: int = 256
+    budget_step: int = 2
     # How n_anchors_for() decides the anchor/query split, for
     # resampler_arch="pool_anchored":
     #   "ratio" (default) -- always ~anchor_ratio of the budget, computed for

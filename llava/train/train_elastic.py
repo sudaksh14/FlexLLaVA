@@ -140,6 +140,9 @@ def _write_run_manifest(elastic_args, tok_levels, lora_ranks,
                              "query_selection": elastic_args.query_selection},
         "n_sample_students": elastic_args.n_sample_students,
         "single_budget_per_step": elastic_args.single_budget_per_step,
+        "budget_sampling": {"mode": elastic_args.budget_sampling,
+                            "min": elastic_args.budget_min, "max": elastic_args.budget_max,
+                            "step": elastic_args.budget_step},
         "use_nested_dropout": elastic_args.use_nested_dropout,
         "optimizer":        "adamw_torch (HF default)",
         "learning_rate":    _get_argv_value("--learning_rate"),
@@ -229,6 +232,10 @@ def _print_config_banner(elastic_args, tok_levels, lora_ranks,
             resampler_str = f"pool_anchored  (anchor_mode=fixed, anchor_routing={_parse_anchor_routing(elastic_args.anchor_routing)})"
         else:
             resampler_str = f"pool_anchored  (anchor_mode=ratio, anchor_ratio={elastic_args.anchor_ratio})"
+    elif resampler_arch == "parcel_exact":
+        resampler_str = (f"parcel_exact  (PARCEL as published: raw anchors, one self-attn + one cross-attn "
+                         f"block, anchor_routing={_parse_anchor_routing(elastic_args.anchor_routing)}, "
+                         f"query_out_norm={elastic_args.parcel_query_out_norm})")
     else:
         resampler_str = "query  (plain learned query bank)"
     pooling_mode_str = elastic_args.pooling_mode or "(unset -- using --resampler_arch/--anchor_mode directly)"
@@ -425,12 +432,24 @@ def _parse_elastic_args():
                         "highest -- see NestedQueryResampler's docstring "
                         "(llava/model/elastic/resampler.py) before using a "
                         "non-default value.")
-    p.add_argument("--resampler_arch", choices=("query", "pool_anchored"), default="query",
+    p.add_argument("--resampler_arch", choices=("query", "pool_anchored", "parcel_exact"), default="query",
                    help="'query' (default) = the original learned query bank alone. "
                         "'pool_anchored' = PARCEL-style: part of each budget is a "
                         "deterministic average-pooled spatial grid, the rest are "
                         "queries made pool-aware by self-attention before they "
                         "cross-attend to the patches. See docs/EXPERIMENT_JOURNAL.md.")
+    p.add_argument("--parcel_query_out_norm", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=True, metavar="BOOL",
+                   help="resampler_arch=parcel_exact only: LayerNorm on the QUERY outputs "
+                        "(never on the anchors). PARCEL does not specify a final norm.")
+    p.add_argument("--budget_sampling", choices=("ladder", "uniform_range"), default="ladder",
+                   help="How --single_budget_per_step draws its budget. 'ladder' (default): "
+                        "uniform over --tok_levels. 'uniform_range': PARCEL's own sampling, "
+                        "B ~ Uniform{budget_min, budget_min+budget_step, ..., budget_max} "
+                        "every step (an arbitrary budget, not a ladder entry).")
+    p.add_argument("--budget_min", type=int, default=16, metavar="INT")
+    p.add_argument("--budget_max", type=int, default=256, metavar="INT")
+    p.add_argument("--budget_step", type=int, default=2, metavar="INT")
     p.add_argument("--anchor_mode", choices=("ratio", "fixed", "adaptive"), default="ratio",
                    help="'ratio' (default): anchor count is always --anchor_ratio of "
                         "whatever budget is active, computed for any budget. 'fixed': "
@@ -547,6 +566,18 @@ def main():
 
     resampler_arch, anchor_mode = _resolve_resampler_arch_and_anchor_mode(elastic_args)
 
+    if elastic_args.budget_sampling == "uniform_range":
+        if not elastic_args.single_budget_per_step:
+            raise ValueError("--budget_sampling uniform_range needs --single_budget_per_step True")
+        if elastic_args.use_kd or elastic_args.use_coral:
+            raise ValueError("--budget_sampling uniform_range is the PARCEL loss (plain next-token "
+                             "cross-entropy): pass --use_kd False --use_coral False")
+        if elastic_args.budget_max > tok_levels[0]:
+            raise ValueError(f"--budget_max {elastic_args.budget_max} exceeds the query bank "
+                             f"(tok_levels[0]={tok_levels[0]})")
+    if resampler_arch == "parcel_exact" and anchor_mode != "fixed":
+        raise ValueError("--resampler_arch parcel_exact needs --anchor_mode fixed and --anchor_routing")
+
     if os.environ.get("LOCAL_RANK", "0") == "0":
         _print_config_banner(elastic_args, tok_levels, lora_ranks,
                              resampler_arch, anchor_mode)
@@ -586,6 +617,11 @@ def main():
         kl_teacher_tok_level=0,                 # largest tok level is teacher
         n_sample_students=elastic_args.n_sample_students,
         single_budget_per_step=elastic_args.single_budget_per_step,
+        parcel_query_out_norm=elastic_args.parcel_query_out_norm,
+        budget_sampling=elastic_args.budget_sampling,
+        budget_min=elastic_args.budget_min,
+        budget_max=elastic_args.budget_max,
+        budget_step=elastic_args.budget_step,
         log_adapter_every=50,
     )
 
