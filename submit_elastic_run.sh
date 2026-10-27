@@ -412,8 +412,12 @@ case "$RUN" in
     ;;
   parcel-faithful)
     # PARCEL as published (arXiv 2605.30126): budget-aware routing that gives
-    # 16 anchors at n=16 and 64 anchors at n>=64 (so n=16 and n=64 are pure
-    # anchors), queries conditioned on the anchors, nested-dropout queries,
+    # 16 anchors at n=16 and 64 anchors at n>=64, queries conditioned on the anchors,
+    # nested-dropout queries,
+    # CORRECTION 2026-10-27 (see parcel-exact-* below): the pool_anchored arch always keeps >=1
+    # query, so this run actually trained 9 anchors + 7 queries at n=16 and 36 + 28 at n=64
+    # (n_anchors_for snaps down); n=16 and n=64 were NOT pure anchors, and its anchors are
+    # the post-self-attention ones. The literal PARCEL connector is resampler_arch=parcel_exact.
     # FROZEN vision encoder (no LoRA), language-modeling loss only (no
     # distillation). CLIP-L/14-336, TinyLlama, the 4-budget ladder and the paper's
     # data recipe are kept so the row is comparable to Table III.
@@ -434,7 +438,7 @@ case "$RUN" in
     export USE_TOKEN_DECORRELATION=False
     export TEACHER=self
     ;;
-  parcel-exact-nolora|parcel-exact-lora)
+  parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora)
     # THE PARCEL PIPELINE (arXiv 2605.30126), run next to -- never instead of --
     # the Nest-VLM pipeline (RESAMPLER_ARCH=pool_anchored, final-parcel). Every line
     # below is either what the paper states (App. E unless noted) or is marked.
@@ -479,17 +483,22 @@ case "$RUN" in
     export STAGE1_TOK_LEVEL=256
     export STAGE1_LORA_RANK=64
     export LORA_RANKS="8 16 32 64"       # inert while vision LoRA is off
-    if [ "$RUN" = "parcel-exact-lora" ]; then
-        export ELASTIC_RUN_TAG=parcel-exact-lora
-        export VISION_LORA_ENABLE=True
-        export VISION_LORA_SPECIALIZE_TOK=True
-    else
-        export ELASTIC_RUN_TAG=parcel-exact-nolora
-        export VISION_LORA_ENABLE=False
-    fi
+    export ELASTIC_RUN_TAG="$RUN"
+    case "$RUN" in
+        *-lora) export VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True ;;
+        *)      export VISION_LORA_ENABLE=False ;;
+    esac
+    # SigLIP-so400m at 224 px = PARCEL's own encoder and grid (16x16 = 256 patches, width
+    # 1152 -> 12 heads). Anchor counts 16 / 64 are then PARCEL's 4x4 / 2x2 pools, and 256
+    # tokens is its uncompressed grid. NOT queued by default: no SigLIP accuracy result exists
+    # yet (see docs/brainstorm.md section 15). The weights must be fetched once first:
+    #   huggingface-cli download google/siglip-so400m-patch14-224   (compute nodes are offline)
+    case "$RUN" in
+        parcel-exact-so400m224-*) export VISION_TOWER=google/siglip-so400m-patch14-224 ;;
+    esac
     ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful|parcel-exact-nolora|parcel-exact-lora}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful|parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora}" >&2
     exit 1
     ;;
 esac
