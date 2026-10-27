@@ -412,8 +412,12 @@ case "$RUN" in
     ;;
   parcel-faithful)
     # PARCEL as published (arXiv 2605.30126): budget-aware routing that gives
-    # 16 anchors at n=16 and 64 anchors at n>=64 (so n=16 and n=64 are pure
-    # anchors), queries conditioned on the anchors, nested-dropout queries,
+    # 16 anchors at n=16 and 64 anchors at n>=64, queries conditioned on the anchors,
+    # nested-dropout queries,
+    # CORRECTION 2026-10-27 (see parcel-exact-* below): the pool_anchored arch always keeps >=1
+    # query, so this run actually trained 9 anchors + 7 queries at n=16 and 36 + 28 at n=64
+    # (n_anchors_for snaps down); n=16 and n=64 were NOT pure anchors, and its anchors are
+    # the post-self-attention ones. The literal PARCEL connector is resampler_arch=parcel_exact.
     # FROZEN vision encoder (no LoRA), language-modeling loss only (no
     # distillation). CLIP-L/14-336, TinyLlama, the 4-budget ladder and the paper's
     # data recipe are kept so the row is comparable to Table III.
@@ -434,8 +438,67 @@ case "$RUN" in
     export USE_TOKEN_DECORRELATION=False
     export TEACHER=self
     ;;
+  parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora)
+    # THE PARCEL PIPELINE (arXiv 2605.30126), run next to -- never instead of --
+    # the Nest-VLM pipeline (RESAMPLER_ARCH=pool_anchored, final-parcel). Every line
+    # below is either what the paper states (App. E unless noted) or is marked.
+    #
+    #   connector   resampler_arch=parcel_exact: pooled anchors concatenated to the
+    #               output RAW (no post-self-attention anchors, no LayerNorm on
+    #               them); only the queries go through ONE Query<->Pool self-attention
+    #               block and ONE Query->ViT cross-attention block (depth 1). Pure-
+    #               anchor budgets are allowed (N_q = 0). Final LayerNorm on the
+    #               queries only: NOT specified by the paper (PARCEL_QUERY_OUT_NORM).
+    #   routing     Sec. 3.3, literal step function: 16 <= B < 64 -> 4x4 = 16 anchors,
+    #               64 <= B <= 256 -> 8x8 = 64 anchors, N_q = B - N_p. The anchor COUNTS
+    #               are the paper's; on our 24x24 CLIP grid they are pooled 6x6 / 3x3
+    #               blocks (the paper's 16x16 SigLIP grid pools 4x4 / 2x2).
+    #   budgets     B ~ Uniform{16, 18, ..., 256}, one budget per step, arbitrary
+    #               (not a ladder entry) -- "we sample an even total budget". One
+    #               forward per step, so the cost per step is PARCEL's. Evaluation
+    #               uses our 256/144/64/16 ladder.
+    #   loss        plain next-token cross-entropy on the response tokens, nothing
+    #               else. PARCEL describes NO distillation and no teacher (it follows
+    #               the PaliGemma-2 recipe), so USE_KD=False, no CORAL, no decorr.
+    #   optimiser   AdamW (HF default betas), LR 1e-5 = PaliGemma-2's 2e-5 x 0.5
+    #               (App. E) for Stage 2; Stage 1 keeps the connector-only LR 1e-3 of
+    #               the LLaVA recipe (the paper's connector schedule is not given).
+    #               NOT matchable: global batch 8192 vs our 128, TPU/JAX, 100M + 100M
+    #               pretraining samples vs our 558K + 665K, trainable SigLIP encoder.
+    #   data        unchanged: LLaVA-1.5 (558K caption pretraining, 665K mix).
+    #   vision      CLIP-L/14-336, frozen (nolora) or rank-nested per-level LoRA with
+    #               the adapter chosen by the smallest ladder level >= B (lora).
+    export RESAMPLER_ARCH=parcel_exact
+    export ANCHOR_MODE=fixed
+    export ANCHOR_ROUTING="16:16,64:64"
+    export SINGLE_BUDGET_PER_STEP=True
+    export BUDGET_SAMPLING=uniform_range
+    export BUDGET_MIN=16 BUDGET_MAX=256 BUDGET_STEP=2
+    export USE_KD=False USE_CORAL=False
+    export USE_TOKEN_DECORRELATION=False
+    export USE_POS_EMBED=False
+    export TEACHER=self
+    export LR=1e-5
+    export TOK_LEVELS="256 144 64 16"
+    export STAGE1_TOK_LEVEL=256
+    export STAGE1_LORA_RANK=64
+    export LORA_RANKS="8 16 32 64"       # inert while vision LoRA is off
+    export ELASTIC_RUN_TAG="$RUN"
+    case "$RUN" in
+        *-lora) export VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True ;;
+        *)      export VISION_LORA_ENABLE=False ;;
+    esac
+    # SigLIP-so400m at 224 px = PARCEL's own encoder and grid (16x16 = 256 patches, width
+    # 1152 -> 12 heads). Anchor counts 16 / 64 are then PARCEL's 4x4 / 2x2 pools, and 256
+    # tokens is its uncompressed grid. NOT queued by default: no SigLIP accuracy result exists
+    # yet (see docs/brainstorm.md section 15). The weights must be fetched once first:
+    #   huggingface-cli download google/siglip-so400m-patch14-224   (compute nodes are offline)
+    case "$RUN" in
+        parcel-exact-so400m224-*) export VISION_TOWER=google/siglip-so400m-patch14-224 ;;
+    esac
+    ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful|parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora}" >&2
     exit 1
     ;;
 esac
@@ -464,7 +527,7 @@ echo "── ${ELASTIC_RUN_TAG} (${SLM_KEY}) ───────────�
 for v in TOK_LEVELS LORA_RANKS STAGE1_TOK_LEVEL STAGE1_LORA_RANK RESAMPLER_ARCH \
          ANCHOR_MODE ANCHOR_RATIO ANCHOR_ROUTING USE_TOKEN_DECORRELATION DECORR_WEIGHT \
          VISION_LORA_ENABLE VISION_LORA_SPECIALIZE_TOK TEACHER TEACHER_MODEL_PATH \
-         PREFIX_KL_WEIGHT VISION_TOWER USE_KD SINGLE_BUDGET_PER_STEP USE_POS_EMBED POS_EMBED_TYPE SEED; do
+         PREFIX_KL_WEIGHT VISION_TOWER USE_KD SINGLE_BUDGET_PER_STEP BUDGET_SAMPLING BUDGET_MIN BUDGET_MAX BUDGET_STEP LR USE_POS_EMBED POS_EMBED_TYPE SEED; do
     printf '  %-26s %s\n' "$v" "${!v:-<launcher default>}"
 done
 printf '  %-26s %s\n' "gres" "$GRES"
@@ -482,9 +545,12 @@ fi
 
 # DEPENDENCY="afterok:123:456" holds the training job until those jobs finish
 # (used to queue follow-up experiments behind running ones).
-TRAIN_ID=$(sbatch --parsable ${DEPENDENCY:+--dependency=$DEPENDENCY} --gres="$GRES" run_job_slm.sh "$SLM_KEY")
+# Standing rule: the node206-208 restriction applies to EVAL jobs only (SBATCH_EXCLUDE is not honoured, so it is
+# passed explicitly). Training may use any GPU node; TRAIN_NODELIST pins it (e.g. node205 for A40:2).
+EXCLUDE_NODES="${EXCLUDE_NODES:-node205}"
+TRAIN_ID=$(sbatch --parsable ${TRAIN_NODELIST:+--nodelist=$TRAIN_NODELIST} ${DEPENDENCY:+--dependency=$DEPENDENCY} --gres="$GRES" run_job_slm.sh "$SLM_KEY")
 echo "  train job   : $TRAIN_ID  (Stage 1 + Stage 2)"
-EVAL_ID=$(sbatch --parsable --dependency=afterok:"$TRAIN_ID" --array="$ARRAY" \
+EVAL_ID=$(sbatch --parsable --exclude="$EXCLUDE_NODES" --dependency=afterok:"$TRAIN_ID" --array="$ARRAY" \
                  eval_lmms_level.sh "$CKPT")
 echo "  eval job    : $EVAL_ID  (afterok:$TRAIN_ID)"
 echo "  checkpoint  : $CKPT"
