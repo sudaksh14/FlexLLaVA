@@ -59,7 +59,7 @@ PRETRAIN_TAG="${BASELINE_PRETRAIN_TAG:+-${BASELINE_PRETRAIN_TAG}}"
 PRETRAIN_DIR="/var/scratch/skalra/flexllava/checkpoints/baseline-${LLM_KEY}${PRETRAIN_TAG}-pretrain"
 OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/baseline-${LLM_KEY}${TAG}-finetune"
 LOG_DIR="/var/scratch/skalra/flexllava/logs/baseline-${LLM_KEY}${TAG}-finetune"
-RUN_NAME="baseline-${LLM_KEY}-576tok${TAG}-finetune"
+RUN_NAME="baseline-${LLM_KEY}-576tok${TAG/-576tok/}-finetune"
 
 # Effective batch = per_device * accum * gpus = 2 * 32 * 2 = 128, matching
 # TinyLLaVA. Same self-checking form as Stage 1: derive accum from PER_DEVICE

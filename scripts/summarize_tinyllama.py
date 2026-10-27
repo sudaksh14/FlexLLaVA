@@ -9,8 +9,8 @@ EV = "/var/scratch/skalra/flexllava/eval_logs"
 METRICS = [("mme", "mme_percetion_score,none", "MME-P", 1), ("pope", "pope_accuracy,none", "POPE", 100),
            ("scienceqa_img", "exact_match,none", "SciQA", 100), ("textvqa_val", "exact_match,none", "TextVQA", 100),
            ("gqa", "exact_match,none", "GQA", 100)]
-TAGS = ["baseline-tinyllama-576tok-rerun", "baseline-tinyllama-finetune-fastv-k2", "baseline-tinyllama-finetune-fastv-k4",
-        "baseline-tinyllama-finetune-fastv-k8", "baseline-tinyllama-ladder-finetune", "baseline-tinyllama-4tok-finetune",
+TAGS = ["baseline-tinyllama-576tok-rerun", "baseline-tinyllama-576tok-finetune-fastv-k2", "baseline-tinyllama-576tok-finetune-fastv-k4",
+        "baseline-tinyllama-576tok-finetune-fastv-k8", "baseline-tinyllama-ladder-finetune", "baseline-tinyllama-4tok-finetune",
         "mqt-finetune-tinyllama-ladder", "mqt-finetune-tinyllama-4tok", "elastic-finetune-tinyllama-parcel-faithful",
         "elastic-finetune-tinyllama-v8-parcel", "elastic-finetune-tinyllama-v11-parcel-nolora",
         "elastic-finetune-tinyllama-v10-parcel-lora16", "elastic-finetune-tinyllama-v14-parcel-asclora",

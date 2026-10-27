@@ -17,7 +17,7 @@
 #   sbatch --array=2 eval_fastv_level.sh                # one budget
 # Reference for the same backbone/data: dense baseline = baseline-tinyllama-576tok (eval_lmms_baseline_llava.sh).
 
-MODEL_PATH=${1:-/var/scratch/skalra/flexllava/checkpoints/baseline-tinyllama-576tok}
+MODEL_PATH=${1:-/var/scratch/skalra/flexllava/checkpoints/baseline-tinyllama-576tok-finetune}
 FASTV_K=${FASTV_K:-2}
 BUDGETS=(256 144 64 16)
 NTOK=${BUDGETS[$SLURM_ARRAY_TASK_ID]}
