@@ -157,7 +157,11 @@ class ElasticEngine:
     def level_for_budget(self, budget):
         """Ladder index whose vision-LoRA adapter serves an arbitrary budget: the
         smallest tok_level that is >= budget (the largest level if budget exceeds
-        every entry)."""
+        every entry). cfg.lora_small_budget_max > 0 overrides this for small budgets:
+        B <= it uses the smallest level's adapter."""
+        small = getattr(self.cfg, "lora_small_budget_max", 0)
+        if small and budget <= small:
+            return min(range(len(self.cfg.tok_levels)), key=lambda i: self.cfg.tok_levels[i])
         ge = [i for i, t in enumerate(self.cfg.tok_levels) if t >= budget]
         if not ge:
             return 0

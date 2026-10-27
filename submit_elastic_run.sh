@@ -485,7 +485,10 @@ case "$RUN" in
     export LORA_RANKS="8 16 32 64"       # inert while vision LoRA is off
     export ELASTIC_RUN_TAG="$RUN"
     case "$RUN" in
-        *-lora) export VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True ;;
+        # LORA_SMALL_BUDGET_MAX=30: B in {16..30} uses the rank-64 (level-16) adapter. Without it the
+        # smallest-level->=B rule gives rank 64 only to B == 16 (1 step in 121). Added 2026-10-27 AFTER
+        # the CLIP parcel-exact-lora run 27993 started, so that run used the plain rule.
+        *-lora) export VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True LORA_SMALL_BUDGET_MAX=30 ;;
         *)      export VISION_LORA_ENABLE=False ;;
     esac
     # SigLIP-so400m at 224 px = PARCEL's own encoder and grid (16x16 = 256 patches, width
