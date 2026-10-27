@@ -140,6 +140,13 @@ class ElasticConfig:
     budget_min: int = 16
     budget_max: int = 256
     budget_step: int = 2
+    # Vision-LoRA adapter for the small end of uniform_range sampling. The default
+    # rule (smallest ladder level >= B) hands every B in (16, 64] the level-64
+    # adapter and only B == 16 the level-16 one, so the highest-rank adapter (64 for
+    # lora_ranks 8/16/32/64) is trained on ~1 step in 121. When > 0, every budget
+    # B <= lora_small_budget_max uses the SMALLEST ladder level's adapter instead
+    # (e.g. 30: B in {16, ..., 30} -> rank 64). 0 = off (the rule above).
+    lora_small_budget_max: int = 0
     # How n_anchors_for() decides the anchor/query split, for
     # resampler_arch="pool_anchored":
     #   "ratio" (default) -- always ~anchor_ratio of the budget, computed for

@@ -15,6 +15,7 @@ conda activate matryoshka-mm
 cd /home/skalra/FlexLLaVA
 python3 - <<'PYEOF'
 import sys
+import dataclasses
 import torch
 
 from llava.model.elastic.resampler import NestedQueryResampler, pool_anchors
@@ -141,6 +142,12 @@ print(f"OK: B ~ Uniform{{16,18,...,256}}  (mean {mean:.1f}, expected 136, 121 di
 for b, lvl in ((256, 0), (200, 0), (145, 0), (144, 1), (100, 1), (65, 1), (64, 2), (17, 2), (16, 3)):
     assert eng.level_for_budget(b) == lvl, (b, eng.level_for_budget(b), lvl)
 print("OK: LoRA level for an arbitrary B = smallest ladder level >= B")
+cfg_s = ElasticConfig(**{**dataclasses.asdict(cfg), "lora_small_budget_max": 30})
+eng_s = ElasticEngine(cfg_s, _VT(), C, 48)
+for b, lvl in ((256, 0), (146, 0), (144, 1), (66, 1), (64, 2), (32, 2), (30, 3), (18, 3), (16, 3)):
+    assert eng_s.level_for_budget(b) == lvl, (b, eng_s.level_for_budget(b), lvl)
+assert ElasticConfig(**dataclasses.asdict(cfg_s)).lora_small_budget_max == 30
+print("OK: lora_small_budget_max=30 sends B<=30 to the smallest level (rank 64); default stays off")
 
 # ---- 8. engine.reduce_tokens: arbitrary B in training, the ladder at evaluation ----
 feats = torch.randn(2, P, C)

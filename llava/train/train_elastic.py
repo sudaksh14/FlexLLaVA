@@ -142,7 +142,8 @@ def _write_run_manifest(elastic_args, tok_levels, lora_ranks,
         "single_budget_per_step": elastic_args.single_budget_per_step,
         "budget_sampling": {"mode": elastic_args.budget_sampling,
                             "min": elastic_args.budget_min, "max": elastic_args.budget_max,
-                            "step": elastic_args.budget_step},
+                            "step": elastic_args.budget_step,
+                            "lora_small_budget_max": elastic_args.lora_small_budget_max},
         "use_nested_dropout": elastic_args.use_nested_dropout,
         "optimizer":        "adamw_torch (HF default)",
         "learning_rate":    _get_argv_value("--learning_rate"),
@@ -450,6 +451,10 @@ def _parse_elastic_args():
     p.add_argument("--budget_min", type=int, default=16, metavar="INT")
     p.add_argument("--budget_max", type=int, default=256, metavar="INT")
     p.add_argument("--budget_step", type=int, default=2, metavar="INT")
+    p.add_argument("--lora_small_budget_max", type=int, default=0, metavar="INT",
+                   help="uniform_range + vision LoRA: budgets <= this use the smallest ladder "
+                        "level's (highest-rank) adapter instead of the smallest level >= B. "
+                        "0 = off.")
     p.add_argument("--anchor_mode", choices=("ratio", "fixed", "adaptive"), default="ratio",
                    help="'ratio' (default): anchor count is always --anchor_ratio of "
                         "whatever budget is active, computed for any budget. 'fixed': "
@@ -622,6 +627,7 @@ def main():
         budget_min=elastic_args.budget_min,
         budget_max=elastic_args.budget_max,
         budget_step=elastic_args.budget_step,
+        lora_small_budget_max=elastic_args.lora_small_budget_max,
         log_adapter_every=50,
     )
 
