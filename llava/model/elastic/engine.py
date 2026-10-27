@@ -109,9 +109,17 @@ class ElasticEngine:
         self.resampler = None
         if cfg.is_nested_query:
             num_patches = getattr(vision_tower, "num_patches", 576)
+            # parcel_exact = PARCEL App. E: one self-attention block + ONE
+            # cross-attention block, 12 heads at SigLIP-so400m's width 1152. Every
+            # other arch keeps the historical depth 2 / 8 heads.
+            _parcel = getattr(cfg, "resampler_arch", "query") == "parcel_exact"
+            _arch_kw = ({"depth": 1, "n_heads": 12 if vision_dim == 1152 else 8}
+                        if _parcel else {})
             self.resampler = NestedQueryResampler(
                 vision_dim, cfg.num_query_tokens,
                 num_patches=num_patches,
+                parcel_query_out_norm=getattr(cfg, "parcel_query_out_norm", True),
+                **_arch_kw,
                 use_pos_embed=cfg.use_pos_embed,
                 pos_embed_type=getattr(cfg, "pos_embed_type", "learned"),
                 query_selection=getattr(cfg, "query_selection", "prefix"),
@@ -132,6 +140,28 @@ class ElasticEngine:
                                   # gradient-checkpointed backward recompute -- so it
                                   # is a safe seed for any per-step random draw that
                                   # must match across ranks and across recompute.
+
+    # -- PARCEL-style uniform budget sampling ---------------------------
+    def uniform_budget(self):
+        """The budget B ~ Uniform{budget_min, budget_min+step, ..., budget_max} for
+        THIS training forward, or None when cfg.budget_sampling is "ladder".
+
+        A pure function of the per-forward counter, so every DDP rank draws the
+        same B and a gradient-checkpointed backward recompute sees the same one
+        (same reasoning as the nested-dropout draw in reduce_tokens)."""
+        if getattr(self.cfg, "budget_sampling", "ladder") != "uniform_range":
+            return None
+        choices = range(self.cfg.budget_min, self.cfg.budget_max + 1, self.cfg.budget_step)
+        return random.Random(self._fwd_step * 2654435761 + 97).choice(choices)
+
+    def level_for_budget(self, budget):
+        """Ladder index whose vision-LoRA adapter serves an arbitrary budget: the
+        smallest tok_level that is >= budget (the largest level if budget exceeds
+        every entry)."""
+        ge = [i for i, t in enumerate(self.cfg.tok_levels) if t >= budget]
+        if not ge:
+            return 0
+        return min(ge, key=lambda i: self.cfg.tok_levels[i])
 
     # -- grid (1-D over token levels) -----------------------------------
     def grid(self):
@@ -155,9 +185,12 @@ class ElasticEngine:
             reduced = self._avg_pool(image_features, self.cfg.tok_levels[l_tok])
         else:
             n_tok = self.cfg.tok_levels[l_tok]
+            _ub = self.uniform_budget() if self.resampler.training else None
+            if _ub is not None:
+                n_tok = _ub
             # nested dropout induces the query ordering -- but never truncate the
             # teacher level, which must stay the full bank for prefix-KL/CORAL.
-            if (self.cfg.use_nested_dropout and self.resampler.training
+            if (_ub is None and self.cfg.use_nested_dropout and self.resampler.training
                     and l_tok != self.cfg.kl_teacher_tok_level):
                 # Seed the truncation deterministically so every DDP rank draws the
                 # SAME n_tok for this (step, level) -> identical forward/backward

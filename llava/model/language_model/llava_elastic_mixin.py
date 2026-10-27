@@ -103,7 +103,10 @@ class LlavaElasticMixin:
         teacher_tok = cfg.tok_levels[cfg.kl_teacher_tok_level]
         n = cfg.n_sample_students
         n_students_total = len(cfg.tok_levels) - 1
-        if getattr(cfg, "single_budget_per_step", False):
+        if getattr(cfg, "single_budget_per_step", False) and getattr(cfg, "budget_sampling", "ladder") == "uniform_range":
+            mode = (f"single-budget-per-step — B ~ Uniform{{{cfg.budget_min}, {cfg.budget_min + cfg.budget_step}, ..., "
+                    f"{cfg.budget_max}}} per step (PARCEL sampling), no reference level")
+        elif getattr(cfg, "single_budget_per_step", False):
             mode = "single-budget-per-step — one uniformly drawn budget per step, no reference level"
         elif 0 < n < n_students_total:
             mode = f"sample_student({n}) — teacher + {n} random student{'s' if n > 1 else ''} per step"
@@ -267,7 +270,15 @@ class LlavaElasticMixin:
             # expectation 1/n_students_total of the time, matching full-grid.
             n_sample = cfg.n_sample_students
             students_all = [l for l in grid if l != cfg.kl_teacher_tok_level]
-            if getattr(cfg, "single_budget_per_step", False):
+            _ub = engine.uniform_budget()
+            if getattr(cfg, "single_budget_per_step", False) and _ub is not None:
+                # PARCEL's budget sampling: an ARBITRARY B ~ U{budget_min..budget_max
+                # step budget_step} per step (the resampler runs at exactly B, see
+                # engine.reduce_tokens); the level only selects the vision-LoRA
+                # adapter, = the smallest ladder level >= B.
+                active_levels = [engine.level_for_budget(_ub)]
+                sampled_students = None
+            elif getattr(cfg, "single_budget_per_step", False):
                 # One budget per step, uniform over the whole ladder, no reference
                 # level. Seeded from the shared per-forward counter (as the student
                 # draw below) so every DDP rank picks the same level.
@@ -306,8 +317,10 @@ class LlavaElasticMixin:
                     images=images, image_sizes=image_sizes, return_dict=return_dict,
                     matryoshka_vis_token_scale=l_tok,
                 )
-                n_tok = cfg.tok_levels[l_tok]
-                tag = f"tok{n_tok}"
+                n_tok = cfg.tok_levels[l_tok] if _ub is None else _ub
+                tag = f"tok{n_tok}" if _ub is None else "tokuniform"
+                if _ub is not None:
+                    per_level["info/sampled_budget"] = float(_ub)
                 self._health_check(f"logits_{tag}", logits)
                 self._health_check(f"ce_loss_{tag}", loss_item)
                 per_level[f"loss/ce_{tag}"] = loss_item.item()

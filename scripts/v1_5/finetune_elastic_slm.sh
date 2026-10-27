@@ -189,13 +189,16 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --use_nested_dropout False \
     --n_sample_students 1 \
     --single_budget_per_step "${SINGLE_BUDGET_PER_STEP:-False}" \
+    --budget_sampling "${BUDGET_SAMPLING:-ladder}" \
+    --budget_min "${BUDGET_MIN:-16}" --budget_max "${BUDGET_MAX:-256}" --budget_step "${BUDGET_STEP:-2}" \
+    --parcel_query_out_norm "${PARCEL_QUERY_OUT_NORM:-True}" \
     --vision_lora_enable "${VISION_LORA_ENABLE:-False}" \
     --vision_lora_specialize_tok "${VISION_LORA_SPECIALIZE_TOK:-True}" \
     --lora_enable False \
     --lora_r 128 \
     --lora_alpha 128 \
-    --mm_projector_lr 2e-5 \
-    --mm_vision_tower_lr 2e-5 \
+    --mm_projector_lr "${LR:-2e-5}" \
+    --mm_vision_tower_lr "${LR:-2e-5}" \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path "${MODEL_PATH}" \
     --pretrain_elastic_path "${PRETRAIN_CKPT}" \
@@ -222,7 +225,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --save_strategy "steps" \
     --save_steps 500 \
     --save_total_limit 1 \
-    --learning_rate 2e-5 \
+    --learning_rate "${LR:-2e-5}" \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \

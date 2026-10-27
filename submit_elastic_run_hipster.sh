@@ -212,8 +212,72 @@ case "$RUN" in
         exit 1
     fi
     ;;
+  parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora)
+    # THE PARCEL PIPELINE (arXiv 2605.30126), run next to -- never instead of --
+    # the Nest-VLM pipeline (RESAMPLER_ARCH=pool_anchored, final-parcel). Every line
+    # below is either what the paper states (App. E unless noted) or is marked.
+    #
+    #   connector   resampler_arch=parcel_exact: pooled anchors concatenated to the
+    #               output RAW (no post-self-attention anchors, no LayerNorm on
+    #               them); only the queries go through ONE Query<->Pool self-attention
+    #               block and ONE Query->ViT cross-attention block (depth 1). Pure-
+    #               anchor budgets are allowed (N_q = 0). Final LayerNorm on the
+    #               queries only: NOT specified by the paper (PARCEL_QUERY_OUT_NORM).
+    #   routing     Sec. 3.3, literal step function: 16 <= B < 64 -> 4x4 = 16 anchors,
+    #               64 <= B <= 256 -> 8x8 = 64 anchors, N_q = B - N_p. The anchor COUNTS
+    #               are the paper's; on our 24x24 CLIP grid they are pooled 6x6 / 3x3
+    #               blocks (the paper's 16x16 SigLIP grid pools 4x4 / 2x2).
+    #   budgets     B ~ Uniform{16, 18, ..., 256}, one budget per step, arbitrary
+    #               (not a ladder entry) -- "we sample an even total budget". One
+    #               forward per step, so the cost per step is PARCEL's. Evaluation
+    #               uses our 256/144/64/16 ladder.
+    #   loss        plain next-token cross-entropy on the response tokens, nothing
+    #               else. PARCEL describes NO distillation and no teacher (it follows
+    #               the PaliGemma-2 recipe), so USE_KD=False, no CORAL, no decorr.
+    #   optimiser   AdamW (HF default betas), LR 1e-5 = PaliGemma-2's 2e-5 x 0.5
+    #               (App. E) for Stage 2; Stage 1 keeps the connector-only LR 1e-3 of
+    #               the LLaVA recipe (the paper's connector schedule is not given).
+    #               NOT matchable: global batch 8192 vs our 128, TPU/JAX, 100M + 100M
+    #               pretraining samples vs our 558K + 665K, trainable SigLIP encoder.
+    #   data        unchanged: LLaVA-1.5 (558K caption pretraining, 665K mix).
+    #   vision      CLIP-L/14-336, frozen (nolora) or rank-nested per-level LoRA with
+    #               the adapter chosen by the smallest ladder level >= B (lora).
+    export RESAMPLER_ARCH=parcel_exact
+    export ANCHOR_MODE=fixed
+    export ANCHOR_ROUTING="16:16,64:64"
+    export SINGLE_BUDGET_PER_STEP=True
+    export BUDGET_SAMPLING=uniform_range
+    export BUDGET_MIN=16 BUDGET_MAX=256 BUDGET_STEP=2
+    export USE_KD=False USE_CORAL=False
+    export USE_TOKEN_DECORRELATION=False
+    export USE_POS_EMBED=False
+    export TEACHER=self
+    export LR=1e-5
+    export TOK_LEVELS="256 144 64 16"
+    export STAGE1_TOK_LEVEL=256
+    export STAGE1_LORA_RANK=64
+    export LORA_RANKS="8 16 32 64"       # inert while vision LoRA is off
+    export ELASTIC_RUN_TAG="$RUN"
+    case "$RUN" in
+        *-lora) export VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True ;;
+        *)      export VISION_LORA_ENABLE=False ;;
+    esac
+    # SigLIP-so400m at 224 px = PARCEL's own encoder and grid (16x16 = 256 patches, width
+    # 1152 -> 12 heads). Anchor counts 16 / 64 are then PARCEL's 4x4 / 2x2 pools, and 256
+    # tokens is its uncompressed grid. NOT queued by default: no SigLIP accuracy result exists
+    # yet (see docs/brainstorm.md section 15). The weights must be fetched once first:
+    #   huggingface-cli download google/siglip-so400m-patch14-224   (compute nodes are offline)
+    case "$RUN" in
+        parcel-exact-so400m224-*) export VISION_TOWER=google/siglip-so400m-patch14-224 ;;
+    esac
+    # hipster mechanics (not part of the recipe): the SigLIP-so400m tower plus 4-GPU ZeRO-2 is untested on
+    # 24GB L4s, so the so400m224 variants default to the 48GB RTX 6000 Ada partition.
+    case "$RUN" in
+        parcel-exact-so400m224-*) DEFAULT_PARTITION="performance" ;;
+    esac
+    ;;
   *)
-    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b|v8-siglip-parcel|v8-siglip-so400m-parcel|v8-siglip-so400m-adaptive-parcel} {tinyllama|smollm2|mobilellama} [performance|capacity]" >&2
+    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b|v8-siglip-parcel|v8-siglip-so400m-parcel|v8-siglip-so400m-adaptive-parcel|parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora} {tinyllama|smollm2|mobilellama} [performance|capacity]" >&2
     exit 1
     ;;
 esac
@@ -241,7 +305,7 @@ echo "── ${ELASTIC_RUN_TAG} (${SLM_KEY}) on hipster:${PARTITION} ───�
 for v in TOK_LEVELS LORA_RANKS STAGE1_TOK_LEVEL STAGE1_LORA_RANK RESAMPLER_ARCH \
          ANCHOR_MODE ANCHOR_RATIO ANCHOR_ROUTING USE_TOKEN_DECORRELATION DECORR_WEIGHT \
          VISION_LORA_ENABLE VISION_LORA_SPECIALIZE_TOK TEACHER TEACHER_MODEL_PATH \
-         PREFIX_KL_WEIGHT VISION_TOWER; do
+         PREFIX_KL_WEIGHT VISION_TOWER USE_KD USE_CORAL USE_POS_EMBED LR \n         SINGLE_BUDGET_PER_STEP BUDGET_SAMPLING BUDGET_MIN BUDGET_MAX BUDGET_STEP; do
     printf '  %-26s %s\n' "$v" "${!v:-<launcher default>}"
 done
 printf '  %-26s %s\n' "partition" "$PARTITION"

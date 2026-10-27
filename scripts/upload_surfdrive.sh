@@ -9,7 +9,7 @@
 #SBATCH --output=/var/scratch/skalra/flexllava/logs/surfdrive-upload-%j.out
 # Resumable upload of all checkpoints to a SURFdrive public share via WebDAV.
 # Usage: sbatch scripts/upload_surfdrive.sh [TOKEN] [SUBDIR]
-#   SUBDIR (e.g. baseline-tinyllama-finetune) restricts the upload to one checkpoint folder and skips its
+#   SUBDIR (e.g. baseline-tinyllama-576tok-finetune) restricts the upload to one checkpoint folder and skips its
 #   checkpoint-N/ subdirs (DeepSpeed optimizer states); without it everything under checkpoints/ is uploaded.
 TOKEN=${1:-w3BNexeJk9WxwCC}
 SUBDIR=${2:-}

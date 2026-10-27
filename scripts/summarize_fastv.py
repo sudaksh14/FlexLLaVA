@@ -35,11 +35,11 @@ print(f"{'dense 576 (old, deleted ckpt)':44s} {row(r)}")
 r = load(f"{EV}/baseline-tinyllama-576tok-rerun")
 print(f"{'dense 576 (re-trained)':44s} {row(r)}")
 for n in (256, 144, 64, 16):
-    r = load(f"{EV}/baseline-tinyllama-finetune-fastv-k2/{n}tok")
+    r = load(f"{EV}/baseline-tinyllama-576tok-finetune-fastv-k2/{n}tok")
     print(f"{f'FastV K=2, keep {n}/576 (re-trained dense)':44s} {row(r)}")
 for n in (256, 144, 64, 16):
     r = load(f"{EV}/elastic-finetune-tinyllama-v8-parcel/{n}tok")
     print(f"{f'final-parcel (Nest-VLM) @ {n} tokens':44s} {row(r)}")
 # also dump the raw keys of one results file so a wrong key name is visible
-r = load(f"{EV}/baseline-tinyllama-finetune-fastv-k2/64tok")
+r = load(f"{EV}/baseline-tinyllama-576tok-finetune-fastv-k2/64tok")
 print("\nkeys:", {t: [k for k in v if "stderr" not in k and k != "alias"] for t, v in (r or {}).items()})

@@ -96,8 +96,12 @@ deepspeed --num_gpus ${NUM_GPUS} --master_port ${MASTER_PORT} llava/train/train_
     --prefix_kl_weight "${PREFIX_KL_WEIGHT:-0.1}" \
     --coral_weight 0.1 \
     --use_coral False \
-    --use_pos_embed True \
-    --pos_embed_type learned \
+    --use_pos_embed "${USE_POS_EMBED:-True}" \
+    --pos_embed_type "${POS_EMBED_TYPE:-learned}" \
+    --single_budget_per_step "${SINGLE_BUDGET_PER_STEP:-False}" \
+    --budget_sampling "${BUDGET_SAMPLING:-ladder}" \
+    --budget_min "${BUDGET_MIN:-16}" --budget_max "${BUDGET_MAX:-256}" --budget_step "${BUDGET_STEP:-2}" \
+    --parcel_query_out_norm "${PARCEL_QUERY_OUT_NORM:-True}" \
     --use_nested_dropout False \
     --n_sample_students 1 \
     --vision_lora_enable "${VISION_LORA_ENABLE:-False}" \
@@ -105,8 +109,8 @@ deepspeed --num_gpus ${NUM_GPUS} --master_port ${MASTER_PORT} llava/train/train_
     --lora_enable False \
     --lora_r 128 \
     --lora_alpha 128 \
-    --mm_projector_lr 2e-5 \
-    --mm_vision_tower_lr 2e-5 \
+    --mm_projector_lr "${LR:-2e-5}" \
+    --mm_vision_tower_lr "${LR:-2e-5}" \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path "${MODEL_PATH}" \
     --pretrain_elastic_path "${PRETRAIN_CKPT}" \
@@ -123,6 +127,8 @@ deepspeed --num_gpus ${NUM_GPUS} --master_port ${MASTER_PORT} llava/train/train_
     --group_by_modality_length True \
     --bf16 True \
     --output_dir "${OUTPUT_DIR}" \
+    ${MAX_STEPS:+--max_steps ${MAX_STEPS}} \
+    ${SEED:+--seed ${SEED}} \
     --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 2 \
@@ -131,7 +137,7 @@ deepspeed --num_gpus ${NUM_GPUS} --master_port ${MASTER_PORT} llava/train/train_
     --save_strategy "steps" \
     --save_steps 500 \
     --save_total_limit 1 \
-    --learning_rate 2e-5 \
+    --learning_rate "${LR:-2e-5}" \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
