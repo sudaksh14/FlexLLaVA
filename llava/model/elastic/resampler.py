@@ -297,7 +297,10 @@ class NestedQueryResampler(nn.Module):
             valid = valid_anchor_counts(num_patches)
             if self.anchor_routing:
                 for b, npch in sorted(self.anchor_routing.items()):
-                    if anchor_mode != "adaptive" and npch not in valid:
+                    # parcel_exact also accepts perfect squares that do not divide the grid (256 on 24x24):
+                    # _pool_anchors_parcel pools those adaptively, as M3 does.
+                    _sq = int(round(npch ** 0.5)) ** 2 == npch
+                    if anchor_mode != "adaptive" and npch not in valid and not (resampler_arch == "parcel_exact" and _sq):
                         raise ValueError(
                             f"anchor_routing[{b}]={npch} is not reachable by integer "
                             f"pooling of a {num_patches}-patch grid; valid: {valid}")
