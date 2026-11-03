@@ -208,7 +208,7 @@ cfg4 = ElasticConfig(token_reduction="nested_query", tok_levels=[256, 144, 64, 1
                      project_before_pool=True, use_lora=False, lora_ranks=[8, 16, 32, 64],
                      use_prefix_kl=False, use_coral_align=False, use_pos_embed=False)
 eng4 = ElasticEngine(cfg4, _VT(), C, 48)
-eng4.eval()
+eng4.resampler.eval(); eng4.projector.eval()
 with torch.no_grad():
     proj = eng4.projector(x)
     for l, b in enumerate((256, 144, 64, 16)):
