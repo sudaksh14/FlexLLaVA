@@ -129,6 +129,14 @@ class ElasticConfig:
     # has an arbitrary scale next to the raw anchors. Recorded so it can be
     # flipped without a code change.
     parcel_query_out_norm: bool = True
+    # parcel_exact only: M3's ORDER of operations. M3 (llava_arch.encode_images) runs the
+    # mm_projector on all 576 CLIP patches and pools the PROJECTED tokens afterwards, so its
+    # projector only ever sees per-patch features (exactly its Stage-1 input). Every elastic
+    # recipe so far reduces the raw CLIP features first and projects the reduced tokens, so the
+    # projector sees smoothed, pooled features at levels it was not aligned on. True = project
+    # all patches, then pool (needs a pure-anchor routing: every ladder level == its anchor count,
+    # N_q = 0). False (default) = unchanged behaviour for every existing run and checkpoint.
+    project_before_pool: bool = False
     # How training budgets are drawn when single_budget_per_step is on.
     #   "ladder"        -- uniform over the discrete tok_levels (parcel-faithful).
     #   "uniform_range" -- PARCEL's own sampling (App. E): B ~ Uniform{budget_min,

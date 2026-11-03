@@ -186,5 +186,46 @@ old_raw = {k: v for k, v in raw.items() if k not in ("parcel_query_out_norm", "b
                                                      "budget_min", "budget_max", "budget_step")}
 assert ElasticConfig(**old_raw).budget_sampling == "ladder", "old checkpoints must still load"
 print("OK: elastic_config.json round-trips; pre-existing checkpoints load with ladder defaults")
+# ---- 11. full pure-pooling routing reproduces M3's pooling at every ladder level ----
+import torch.nn.functional as F
+FULL = {16: 16, 64: 64, 144: 144, 256: 256}
+rm3 = make(anchor_routing=FULL)
+rm3.eval()
+with torch.no_grad():
+    for b in (256, 144, 64, 16):
+        assert rm3.n_anchors_for(b, P) == b
+        out = rm3(x, n_tok=b)
+        g = int(round(b ** 0.5))
+        ref = F.adaptive_avg_pool2d(x.view(2, 24, 24, C).permute(0, 3, 1, 2), (g, g))
+        ref = ref.permute(0, 2, 3, 1).reshape(2, g * g, C)
+        assert out.shape == (2, b, C) and torch.allclose(out, ref, atol=1e-6), f"B={b} must equal M3 pooling"
+        if b in (144, 64, 16):          # divides the grid: unchanged exact-stride path
+            assert torch.equal(out, pool_anchors(x, b)), f"B={b} exact-stride path changed"
+print("OK: routing {16:16,64:64,144:144,256:256} == M3 pooling (adaptive at 256, exact stride otherwise)")
+# ---- 12. project_before_pool == M3's order (project every patch, then pool) ----
+cfg4 = ElasticConfig(token_reduction="nested_query", tok_levels=[256, 144, 64, 16], num_query_tokens=256,
+                     resampler_arch="parcel_exact", anchor_mode="fixed", anchor_routing=FULL,
+                     project_before_pool=True, use_lora=False, lora_ranks=[8, 16, 32, 64],
+                     use_prefix_kl=False, use_coral_align=False, use_pos_embed=False)
+eng4 = ElasticEngine(cfg4, _VT(), C, 48)
+eng4.eval()
+with torch.no_grad():
+    proj = eng4.projector(x)
+    for l, b in enumerate((256, 144, 64, 16)):
+        got = eng4.reduce_tokens(x, l)
+        g = int(round(b ** 0.5))
+        ref = F.adaptive_avg_pool2d(proj.view(2, 24, 24, -1).permute(0, 3, 1, 2), (g, g))
+        ref = ref.permute(0, 2, 3, 1).reshape(2, g * g, -1)
+        assert got.shape == (2, b, 48) and torch.allclose(got, ref, atol=1e-5), f"level {b}"
+print("OK: project_before_pool == avg_pool(projector(all patches)) at every ladder level (M3 order)")
+bad = ElasticConfig(token_reduction="nested_query", tok_levels=[256, 144, 64, 16], num_query_tokens=256,
+                    resampler_arch="parcel_exact", anchor_mode="fixed", anchor_routing=ROUTING,
+                    project_before_pool=True, use_lora=False, lora_ranks=[8, 16, 32, 64],
+                     use_prefix_kl=False, use_coral_align=False, use_pos_embed=False)
+try:
+    ElasticEngine(bad, _VT(), C, 48).reduce_tokens(x, 0)
+    raise SystemExit("project_before_pool with query tokens must be rejected")
+except ValueError:
+    print("OK: project_before_pool refuses a routing that still has queries")
 print("ALL_TESTS_PASSED")
 PYEOF

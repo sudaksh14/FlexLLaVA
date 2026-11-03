@@ -100,6 +100,27 @@ def _factor_grid(n: int) -> tuple:
     return r, n // r
 
 
+def _pool_anchors_parcel(image_features: torch.Tensor, n_anchor: int) -> torch.Tensor:
+    """pool_anchors() for parcel_exact, plus M3's own fallback.
+
+    A perfect-square anchor count whose side does not divide the patch grid (256 = 16x16
+    on the 24x24 CLIP grid) cannot be exact-stride pooled; pool_anchors() raises for it,
+    so no earlier parcel_exact routing could contain it. M3 handles exactly this case
+    with F.adaptive_avg_pool2d to (g, g) (llava_arch.matryoshka_vis_token_process), so
+    this does the same, which makes a routing such as {16: 16, 64: 64, 144: 144, 256: 256}
+    reproduce M3's pooling at every ladder level (pure-anchor budgets, N_q = 0). Counts
+    pool_anchors() accepts take the unchanged exact-stride path, bit-for-bit.
+    """
+    N, P, C = image_features.shape
+    side = int(round(P ** 0.5))
+    tgt = int(round(n_anchor ** 0.5))
+    if side * side == P and tgt * tgt == n_anchor and tgt < side and side % tgt != 0:
+        x = image_features.view(N, side, side, C).permute(0, 3, 1, 2)
+        x = F.adaptive_avg_pool2d(x, (tgt, tgt))
+        return x.permute(0, 2, 3, 1).reshape(N, tgt * tgt, C)
+    return pool_anchors(image_features, n_anchor)
+
+
 def pool_anchors_adaptive(image_features: torch.Tensor, n_anchor: int) -> torch.Tensor:
     """Adaptive-pooling FORK of pool_anchors(): exactly `n_anchor` grid-aligned
     anchor tokens for ANY n_anchor in [1, P], not just the perfect-square,
@@ -601,7 +622,7 @@ class NestedQueryResampler(nn.Module):
             raise ValueError(
                 f"budget {n_tok} needs {n_q} query tokens but the bank holds "
                 f"{self.num_queries}; raise num_query_tokens (= tok_levels[0])")
-        anchors = pool_anchors(image_features, n_p)               # (N, n_p, C)
+        anchors = _pool_anchors_parcel(image_features, n_p)       # (N, n_p, C)
         if n_q <= 0:
             return anchors
 

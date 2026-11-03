@@ -500,8 +500,51 @@ case "$RUN" in
         parcel-exact-so400m224-*) export VISION_TOWER=google/siglip-so400m-patch14-224 ;;
     esac
     ;;
+  parcel-exact-m3recipe|m3-pool-lora)
+    # RUNS 1 AND 2 OF docs/brainstorm.md section 18: the M3 training recipe, run through the elastic
+    # pipeline. section 17 showed parcel_exact's pure-pooling levels (64, 16 tokens) still trail the M3
+    # ladder by 4.3 / 2.5 TextVQA although they are the same pooling, so the gap is training, not the
+    # connector. M3 (finetune_baseline_slm.sh, verified identical on DAS-6 and hipster) differs in Stage 2
+    # by: LR 2e-5 (parcel-exact: 1e-5), ALL four ladder levels every step with the CE averaged (parcel-exact:
+    # one random budget per step), and a Stage 1 that aligns a plain projector to raw CLIP features.
+    # Both recipes below switch the first two on (SINGLE_BUDGET_PER_STEP=False and budget_sampling=ladder
+    # make the engine run the whole grid and average the CE, exactly M3's loop), no KD, no CORAL, no decorr.
+    export USE_KD=False USE_CORAL=False
+    export USE_TOKEN_DECORRELATION=False
+    export USE_POS_EMBED=False
+    export TEACHER=self
+    export LR=2e-5
+    export SINGLE_BUDGET_PER_STEP=False
+    export BUDGET_SAMPLING=ladder
+    export TOK_LEVELS="256 144 64 16"
+    export STAGE1_TOK_LEVEL=256
+    export STAGE1_LORA_RANK=64
+    export LORA_RANKS="8 16 32 64"
+    export RESAMPLER_ARCH=parcel_exact
+    export ANCHOR_MODE=fixed
+    export ELASTIC_RUN_TAG="$RUN"
+    case "$RUN" in
+        # RUN 1  parcel_exact (PARCEL routing, queries kept, frozen CLIP) + M3's Stage 2 recipe. Stage 1 is
+        # parcel-exact-nolora's, reused (SKIP_STAGE1), so the ONLY changes against that run are LR and the
+        # all-levels-per-step loss: a clean test of "is it the Stage 2 recipe?".
+        parcel-exact-m3recipe)
+            export ANCHOR_ROUTING="16:16,64:64"
+            export VISION_LORA_ENABLE=False
+            export SKIP_STAGE1=1 ELASTIC_PRETRAIN_TAG=parcel-exact-nolora
+            ;;
+        # RUN 2  M3 ladder + nested vision LoRA: every ladder level is a PURE-anchor budget (N_q = 0), i.e. M3
+        # pooling (adaptive at 256, as M3 does), through the elastic projector, with the per-level rank-nested
+        # vision LoRA of final-parcel / parcel-exact-lora. No resampler parameters are trained. Stage 1 is its
+        # own (256 pooled tokens, projector only) because pure-pooling Stage 1 differs from parcel-exact's.
+        m3-pool-lora)
+            export ANCHOR_ROUTING="16:16,64:64,144:144,256:256"
+            export PROJECT_BEFORE_POOL=True      # M3 order: project all 576 patches, then pool (see config.py)
+            export VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True
+            ;;
+    esac
+    ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful|parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful|parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora|parcel-exact-m3recipe|m3-pool-lora}" >&2
     exit 1
     ;;
 esac
@@ -530,7 +573,7 @@ echo "── ${ELASTIC_RUN_TAG} (${SLM_KEY}) ───────────�
 for v in TOK_LEVELS LORA_RANKS STAGE1_TOK_LEVEL STAGE1_LORA_RANK RESAMPLER_ARCH \
          ANCHOR_MODE ANCHOR_RATIO ANCHOR_ROUTING USE_TOKEN_DECORRELATION DECORR_WEIGHT \
          VISION_LORA_ENABLE VISION_LORA_SPECIALIZE_TOK TEACHER TEACHER_MODEL_PATH \
-         PREFIX_KL_WEIGHT VISION_TOWER USE_KD SINGLE_BUDGET_PER_STEP BUDGET_SAMPLING BUDGET_MIN BUDGET_MAX BUDGET_STEP LR USE_POS_EMBED POS_EMBED_TYPE SEED; do
+         PREFIX_KL_WEIGHT VISION_TOWER USE_KD SINGLE_BUDGET_PER_STEP BUDGET_SAMPLING BUDGET_MIN BUDGET_MAX BUDGET_STEP LR PROJECT_BEFORE_POOL SKIP_STAGE1 ELASTIC_PRETRAIN_TAG USE_POS_EMBED POS_EMBED_TYPE SEED; do
     printf '  %-26s %s\n' "$v" "${!v:-<launcher default>}"
 done
 printf '  %-26s %s\n' "gres" "$GRES"
