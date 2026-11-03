@@ -27,3 +27,5 @@ submitted_utc	recipe	slm_key	train_job	eval_job	tok_levels	lora_ranks	resampler	
 2026-10-27T14:16:41Z	parcel-exact-lora	tinyllama	27989	27990	256 144 64 16	8 16 32 64	parcel_exact	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-parcel-exact-lora
 2026-10-27T16:25:45Z	parcel-exact-lora	tinyllama	27993	27994	256 144 64 16	8 16 32 64	parcel_exact	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-parcel-exact-lora
 2026-10-27T17:12:12Z	parcel-exact-lora	tinyllama	27997	27998	256 144 64 16	8 16 32 64	parcel_exact	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-parcel-exact-lora
+2026-11-03T12:44:02Z	parcel-exact-m3recipe	tinyllama	28011	28012	256 144 64 16	8 16 32 64	parcel_exact	False	False	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-parcel-exact-m3recipe
+2026-11-03T12:44:03Z	m3-pool-lora	tinyllama	28013	28014	256 144 64 16	8 16 32 64	parcel_exact	False	True	True	/var/scratch/skalra/flexllava/checkpoints/elastic-finetune-tinyllama-m3-pool-lora
