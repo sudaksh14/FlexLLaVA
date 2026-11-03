@@ -500,7 +500,7 @@ case "$RUN" in
         parcel-exact-so400m224-*) export VISION_TOWER=google/siglip-so400m-patch14-224 ;;
     esac
     ;;
-  parcel-exact-m3recipe|m3-pool-lora)
+  parcel-exact-m3recipe|m3-pool-lora|m3-pool-nolora)
     # RUNS 1 AND 2 OF docs/brainstorm.md section 18: the M3 training recipe, run through the elastic
     # pipeline. section 17 showed parcel_exact's pure-pooling levels (64, 16 tokens) still trail the M3
     # ladder by 4.3 / 2.5 TextVQA although they are the same pooling, so the gap is training, not the
@@ -541,10 +541,18 @@ case "$RUN" in
             export PROJECT_BEFORE_POOL=True      # M3 order: project all 576 patches, then pool (see config.py)
             export VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True
             ;;
+        # RUN 3  the CONTROL for run 2: identical, vision LoRA off. Against the M3 ladder (train.py path) it tests
+        # whether the elastic pipeline reproduces M3 (expect TextVQA ~35.1 / 34.3 / 30.6 / 21.2); against
+        # m3-pool-lora it isolates the vision-LoRA effect.
+        m3-pool-nolora)
+            export ANCHOR_ROUTING="16:16,64:64,144:144,256:256"
+            export PROJECT_BEFORE_POOL=True
+            export VISION_LORA_ENABLE=False
+            ;;
     esac
     ;;
   *)
-    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful|parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora|parcel-exact-m3recipe|m3-pool-lora}" >&2
+    echo "Usage: bash submit_elastic_run.sh {v9-parcel-decorr|v10-parcel-lora16|v11-parcel-nolora|v12-parcel-kd7b|v13-parcel-longladder|v14-parcel-asclora|final-parcel|final-parcel-so400m|final-parcel-576ctrl|v4-query|v4-query-256|v4-query-nopos|v4-query-sincos|parcel-faithful|parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora|parcel-exact-m3recipe|m3-pool-lora|m3-pool-nolora}" >&2
     exit 1
     ;;
 esac
