@@ -277,8 +277,38 @@ case "$RUN" in
         parcel-exact-so400m224-*) DEFAULT_PARTITION="performance" ;;
     esac
     ;;
+  m3-pool-lora|m3-pool-nolora)
+    # RUNS 2 AND 3 OF docs/brainstorm.md section 18, moved to hipster 2026-11-03 (same recipe as
+    # submit_elastic_run.sh on DAS-6; only cluster mechanics differ). M3 ladder through the elastic
+    # pipeline: every ladder level is a PURE-anchor budget (N_q = 0, no query is ever used), tokens are
+    # projected BEFORE pooling as in M3 (PROJECT_BEFORE_POOL), adaptive pooling at 256, LR 2e-5, all four
+    # levels every step with the CE averaged (= M3's loop), no KD/CORAL/decorr. m3-pool-lora adds the
+    # per-level rank-nested vision LoRA; m3-pool-nolora is its control (does the pipeline reproduce the
+    # M3 ladder, TextVQA ~35.1 / 34.3 / 30.6 / 21.2; and the pair isolates the LoRA effect).
+    export RESAMPLER_ARCH=parcel_exact
+    export ANCHOR_MODE=fixed
+    export ANCHOR_ROUTING="16:16,64:64,144:144,256:256"
+    export PROJECT_BEFORE_POOL=True
+    export SINGLE_BUDGET_PER_STEP=False
+    export BUDGET_SAMPLING=ladder
+    export USE_KD=False USE_CORAL=False
+    export USE_TOKEN_DECORRELATION=False
+    export USE_POS_EMBED=False
+    export TEACHER=self
+    export LR=2e-5
+    export TOK_LEVELS="256 144 64 16"
+    export STAGE1_TOK_LEVEL=256
+    export STAGE1_LORA_RANK=64
+    export LORA_RANKS="8 16 32 64"       # inert while vision LoRA is off
+    export ELASTIC_RUN_TAG="$RUN"
+    case "$RUN" in
+        *-lora) export VISION_LORA_ENABLE=True VISION_LORA_SPECIALIZE_TOK=True ;;
+        *)      export VISION_LORA_ENABLE=False ;;
+    esac
+    DEFAULT_PARTITION="performance"      # hipster mechanics: 48GB RTX 6000 Ada, ~3x faster than DAS-6 A10
+    ;;
   *)
-    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b|v8-siglip-parcel|v8-siglip-so400m-parcel|v8-siglip-so400m-adaptive-parcel|parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora} {tinyllama|smollm2|mobilellama} [performance|capacity]" >&2
+    echo "Usage: bash submit_elastic_run_hipster.sh {v11-parcel-nolora|v12-parcel-kd7b|v8-siglip-parcel|v8-siglip-so400m-parcel|v8-siglip-so400m-adaptive-parcel|parcel-exact-nolora|parcel-exact-lora|parcel-exact-so400m224-nolora|parcel-exact-so400m224-lora|m3-pool-lora|m3-pool-nolora} {tinyllama|smollm2|mobilellama} [performance|capacity]" >&2
     exit 1
     ;;
 esac
@@ -306,7 +336,7 @@ echo "── ${ELASTIC_RUN_TAG} (${SLM_KEY}) on hipster:${PARTITION} ───�
 for v in TOK_LEVELS LORA_RANKS STAGE1_TOK_LEVEL STAGE1_LORA_RANK RESAMPLER_ARCH \
          ANCHOR_MODE ANCHOR_RATIO ANCHOR_ROUTING USE_TOKEN_DECORRELATION DECORR_WEIGHT \
          VISION_LORA_ENABLE VISION_LORA_SPECIALIZE_TOK TEACHER TEACHER_MODEL_PATH \
-         PREFIX_KL_WEIGHT VISION_TOWER USE_KD USE_CORAL USE_POS_EMBED LR \n         SINGLE_BUDGET_PER_STEP BUDGET_SAMPLING BUDGET_MIN BUDGET_MAX BUDGET_STEP; do
+         PREFIX_KL_WEIGHT VISION_TOWER USE_KD USE_CORAL USE_POS_EMBED LR \n         PROJECT_BEFORE_POOL SINGLE_BUDGET_PER_STEP BUDGET_SAMPLING BUDGET_MIN BUDGET_MAX BUDGET_STEP; do
     printf '  %-26s %s\n' "$v" "${!v:-<launcher default>}"
 done
 printf '  %-26s %s\n' "partition" "$PARTITION"

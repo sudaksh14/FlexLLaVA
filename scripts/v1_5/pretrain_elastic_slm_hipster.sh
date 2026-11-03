@@ -90,6 +90,7 @@ deepspeed --num_gpus ${NUM_GPUS} --master_port ${MASTER_PORT} llava/train/train_
     --budget_sampling "${BUDGET_SAMPLING:-ladder}" \
     --budget_min "${BUDGET_MIN:-16}" --budget_max "${BUDGET_MAX:-256}" --budget_step "${BUDGET_STEP:-2}" \
     --parcel_query_out_norm "${PARCEL_QUERY_OUT_NORM:-True}" \
+    --project_before_pool "${PROJECT_BEFORE_POOL:-False}" \
     --use_nested_dropout False \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path "${MODEL_PATH}" \
