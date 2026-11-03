@@ -20,7 +20,7 @@ import random
 import torch
 import torch.nn.functional as F
 
-from .resampler import NestedQueryResampler, NestedProjector
+from .resampler import NestedQueryResampler, NestedProjector, _pool_anchors_parcel
 from . import losses
 
 
@@ -185,6 +185,15 @@ class ElasticEngine:
         """image_features: (N, P, C) -> reduced + projected tokens.
         Note: image_features must be (re)computed by the caller AFTER the LoRA
         level is set, if specialization is on; see encode hook in llava_arch."""
+        if getattr(self.cfg, "project_before_pool", False):
+            # M3 order: project every patch, then pool the projected tokens (no queries involved).
+            n_tok = self.cfg.tok_levels[l_tok]
+            if self.resampler.n_anchors_for(n_tok, self.resampler.num_patches) != n_tok:
+                raise ValueError(f"project_before_pool needs a pure-anchor routing; level {n_tok} "
+                                 f"has {self.resampler.n_anchors_for(n_tok, self.resampler.num_patches)} anchors")
+            out = _pool_anchors_parcel(self.projector(image_features), n_tok)
+            self.last_tokens = out
+            return out
         if self.cfg.is_pooling:
             reduced = self._avg_pool(image_features, self.cfg.tok_levels[l_tok])
         else:

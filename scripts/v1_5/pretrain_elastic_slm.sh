@@ -172,6 +172,7 @@ deepspeed --num_gpus ${NUM_GPUS} llava/train/train_elastic.py \
     --budget_sampling "${BUDGET_SAMPLING:-ladder}" \
     --budget_min "${BUDGET_MIN:-16}" --budget_max "${BUDGET_MAX:-256}" --budget_step "${BUDGET_STEP:-2}" \
     --parcel_query_out_norm "${PARCEL_QUERY_OUT_NORM:-True}" \
+    --project_before_pool "${PROJECT_BEFORE_POOL:-False}" \
     --vision_lora_enable "${VISION_LORA_ENABLE:-False}" \
     --vision_lora_specialize_tok "${VISION_LORA_SPECIALIZE_TOK:-True}" \
     --coral_weight 0.01 \

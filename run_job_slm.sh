@@ -104,7 +104,8 @@ fi
 
 # --- SLM pretrain variants (Stage 1) ---
 # Uncomment exactly one line and submit: sbatch run_job.sh
-./scripts/v1_5/pretrain_elastic_slm.sh "$SLM_KEY"
+# SKIP_STAGE1=1 reuses an existing Stage-1 checkpoint (pass ELASTIC_PRETRAIN_TAG to point Stage 2 at it);
+if [ -z "${SKIP_STAGE1:-}" ]; then ./scripts/v1_5/pretrain_elastic_slm.sh "$SLM_KEY"; else echo "[run_job_slm] SKIP_STAGE1 set: reusing elastic-pretrain-${SLM_KEY}-${ELASTIC_PRETRAIN_TAG:-$ELASTIC_RUN_TAG}"; fi
 # ./scripts/v1_5/pretrain_elastic_slm.sh mobilellama
 # ./scripts/v1_5/pretrain_elastic_slm.sh smollm2
 # ./scripts/v1_5/pretrain_elastic_slm.sh qwen0.5b

@@ -443,6 +443,10 @@ def _parse_elastic_args():
                    default=True, metavar="BOOL",
                    help="resampler_arch=parcel_exact only: LayerNorm on the QUERY outputs "
                         "(never on the anchors). PARCEL does not specify a final norm.")
+    p.add_argument("--project_before_pool", type=lambda x: x.lower() not in ("false", "0", "no"),
+                   default=False, metavar="BOOL",
+                   help="resampler_arch=parcel_exact with a pure-anchor routing only: M3's order, "
+                        "project all patches then pool the projected tokens (default False).")
     p.add_argument("--budget_sampling", choices=("ladder", "uniform_range"), default="ladder",
                    help="How --single_budget_per_step draws its budget. 'ladder' (default): "
                         "uniform over --tok_levels. 'uniform_range': PARCEL's own sampling, "
@@ -580,6 +584,11 @@ def main():
         if elastic_args.budget_max > tok_levels[0]:
             raise ValueError(f"--budget_max {elastic_args.budget_max} exceeds the query bank "
                              f"(tok_levels[0]={tok_levels[0]})")
+    if elastic_args.project_before_pool:
+        _routing = _parse_anchor_routing(elastic_args.anchor_routing) or {}
+        if resampler_arch != "parcel_exact" or any(_routing.get(l) != l for l in tok_levels):
+            raise ValueError("--project_before_pool needs --resampler_arch parcel_exact and an "
+                             "--anchor_routing that maps every tok_level to itself (pure pooling)")
     if resampler_arch == "parcel_exact" and anchor_mode != "fixed":
         raise ValueError("--resampler_arch parcel_exact needs --anchor_mode fixed and --anchor_routing")
 
@@ -623,6 +632,7 @@ def main():
         n_sample_students=elastic_args.n_sample_students,
         single_budget_per_step=elastic_args.single_budget_per_step,
         parcel_query_out_norm=elastic_args.parcel_query_out_norm,
+        project_before_pool=elastic_args.project_before_pool,
         budget_sampling=elastic_args.budget_sampling,
         budget_min=elastic_args.budget_min,
         budget_max=elastic_args.budget_max,
