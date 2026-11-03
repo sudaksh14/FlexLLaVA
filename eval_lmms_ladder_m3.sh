@@ -15,7 +15,9 @@
 # budget is passed explicitly: lmms-eval turns `matryoshka_vis_token_scale=256` into an int.
 #
 #   sbatch [--dependency=afterok:<train job>] eval_lmms_ladder_m3.sh [checkpoint_dir]
-BUDGETS=(256 144 64 16)
+# BUDGET_LIST overrides the ladder to evaluate UNSEEN budgets of the same checkpoint (perfect squares g*g, g <= 24;
+# e.g. BUDGET_LIST="576 484 400 324" with --array=0-3). Default = the trained ladder.
+BUDGETS=(${BUDGET_LIST:-256 144 64 16})
 N=${BUDGETS[$SLURM_ARRAY_TASK_ID]}
 MODEL_PATH="${1:-/var/scratch/skalra/flexllava/checkpoints/baseline-tinyllama-ladder-finetune}"
 MODEL_TAG="$(basename "$MODEL_PATH")"
