@@ -585,7 +585,7 @@ if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN set; nothing submitted."; exit 0; f
 # environment (for smoke tests inside an sbatch job; combine with MAX_STEPS,
 # NUM_GPUS and TAG_SUFFIX). Nothing is submitted or logged.
 if [ -n "${RUN_INLINE:-}" ]; then
-    bash scripts/v1_5/pretrain_elastic_slm.sh "$SLM_KEY" && bash scripts/v1_5/finetune_elastic_slm.sh "$SLM_KEY"
+    { [ -n "${SKIP_STAGE1:-}" ] || bash scripts/v1_5/pretrain_elastic_slm.sh "$SLM_KEY"; } && bash scripts/v1_5/finetune_elastic_slm.sh "$SLM_KEY"
     exit $?
 fi
 
