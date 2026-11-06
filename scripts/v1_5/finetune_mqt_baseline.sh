@@ -30,7 +30,7 @@ esac
 TAG="${BASELINE_RUN_TAG:+-${BASELINE_RUN_TAG}}"
 PRETRAIN_TAG="${BASELINE_PRETRAIN_TAG:+-${BASELINE_PRETRAIN_TAG}}"
 : "${PRETRAIN_TAG:=$TAG}"
-PRETRAIN_DIR="/var/scratch/skalra/flexllava/checkpoints/mqt-pretrain-${LLM_KEY}${PRETRAIN_TAG}"
+PRETRAIN_DIR="${PRETRAIN_DIR:-/var/scratch/skalra/flexllava/checkpoints/mqt-baseline-pretrain-256tok}"
 OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/mqt-finetune-${LLM_KEY}${TAG}"
 NUM_VISUAL_TOKENS="${NUM_VISUAL_TOKENS:-4}"
 NUM_GPUS="${NUM_GPUS:-2}"

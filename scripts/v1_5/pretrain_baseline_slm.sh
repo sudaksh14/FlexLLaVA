@@ -42,7 +42,8 @@ case "$LLM_KEY" in
 esac
 
 TAG="${BASELINE_RUN_TAG:+-${BASELINE_RUN_TAG}}"
-OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/baseline-${LLM_KEY}${TAG}-pretrain"
+# Stage 1 always trains on all 576 tokens, so the checkpoint is named by that count (not by LLM/run tag).
+OUTPUT_DIR="${PRETRAIN_DIR:-/var/scratch/skalra/flexllava/checkpoints/m3-baseline-pretrain-576tok}"
 LOG_DIR="/var/scratch/skalra/flexllava/logs/baseline-${LLM_KEY}${TAG}-pretrain"
 RUN_NAME="baseline-${LLM_KEY}-576tok${TAG}-pretrain"
 

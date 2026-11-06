@@ -56,7 +56,7 @@ TAG="${BASELINE_RUN_TAG:+-${BASELINE_RUN_TAG}}"
 # every existing caller (one tag for both stages) is unaffected.
 PRETRAIN_TAG="${BASELINE_PRETRAIN_TAG:+-${BASELINE_PRETRAIN_TAG}}"
 : "${PRETRAIN_TAG:=$TAG}"
-PRETRAIN_DIR="/var/scratch/skalra/flexllava/checkpoints/baseline-${LLM_KEY}${PRETRAIN_TAG}-pretrain"
+PRETRAIN_DIR="${PRETRAIN_DIR:-/var/scratch/skalra/flexllava/checkpoints/m3-baseline-pretrain-576tok}"
 OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/baseline-${LLM_KEY}${TAG}-finetune"
 LOG_DIR="/var/scratch/skalra/flexllava/logs/baseline-${LLM_KEY}${TAG}-finetune"
 RUN_NAME="baseline-${LLM_KEY}-576tok${TAG/-576tok/}-finetune"
