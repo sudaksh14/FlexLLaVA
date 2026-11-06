@@ -34,7 +34,8 @@ case "$LLM_KEY" in
 esac
 
 TAG="${BASELINE_RUN_TAG:+-${BASELINE_RUN_TAG}}"
-OUTPUT_DIR="/var/scratch/skalra/flexllava/checkpoints/mqt-pretrain-${LLM_KEY}${TAG}"
+# Stage 1 always uses 256 queries (num_visual_tokens=first_stage), so the checkpoint is named by that count.
+OUTPUT_DIR="${PRETRAIN_DIR:-/var/scratch/skalra/flexllava/checkpoints/mqt-baseline-pretrain-256tok}"
 NUM_GPUS="${NUM_GPUS:-2}"
 PER_DEVICE="${PER_DEVICE:-8}"
 # Effective batch 256, matching pretrain_baseline_slm.sh, invariant to NUM_GPUS.

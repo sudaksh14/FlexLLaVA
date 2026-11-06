@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 LADDER="256,144,64,16"
-export NUM_GPUS=2 BASELINE_RUN_TAG=ladder BASELINE_PRETRAIN_TAG=4tok
+export NUM_GPUS=2 BASELINE_RUN_TAG=ladder
 WRAP='module load cuda12.1/toolkit/12.1; eval "$(conda shell.bash hook)"; conda activate matryoshka-mm; export HF_HOME=/var/scratch/skalra/.cache/huggingface; cd /home/skalra/FlexLLaVA;'
 
 M3=$(MATRYOSHKA_SCALE="$LADDER" sbatch --parsable --export=ALL --gres=gpu:2 \
